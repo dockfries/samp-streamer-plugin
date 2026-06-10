@@ -129,10 +129,53 @@ void sampgdk_module_cleanup(void);
 #ifndef SAMPGDK_INTERNAL_LOG_H
 #define SAMPGDK_INTERNAL_LOG_H
 
-void sampgdk_log_debug(const char *format, ...);
-void sampgdk_log_info(const char *format, ...);
-void sampgdk_log_warning(const char *format, ...);
-void sampgdk_log_error(const char *format, ...);
+#define SAMPGDK_LOG_DEBUG   0
+#define SAMPGDK_LOG_INFO    1
+#define SAMPGDK_LOG_WARNING 2
+#define SAMPGDK_LOG_ERROR   3
+
+/* The SAMPGDK_MIN_LOG_LEVEL macro allows you to remove calls to logging
+ * functions of certain levels from the resulting machine code at compile
+ * time if you think that you will never need such log verbosity at run
+ * time.
+ */
+#ifndef SAMPGDK_MIN_LOG_LEVEL
+  #ifdef NDEBUG
+    #define SAMPGDK_MIN_LOG_LEVEL SAMPGDK_LOG_INFO
+  #else
+    #define SAMPGDK_MIN_LOG_LEVEL SAMPGDK_LOG_DEBUG
+  #endif
+#endif
+
+#if SAMPGDK_LOG_DEBUG >= SAMPGDK_MIN_LOG_LEVEL
+  #define sampgdk_log_debug(...) \
+    sampgdk_log_message(SAMPGDK_LOG_DEBUG, __VA_ARGS__)
+#else
+  #define sampgdk_log_debug(...)
+#endif
+
+#if SAMPGDK_LOG_INFO >= SAMPGDK_MIN_LOG_LEVEL
+  #define sampgdk_log_info(...) \
+    sampgdk_log_message(SAMPGDK_LOG_INFO, __VA_ARGS__)
+#else
+  #define sampgdk_log_info(...)
+#endif
+
+#if SAMPGDK_LOG_WARNING >= SAMPGDK_MIN_LOG_LEVEL
+  #define sampgdk_log_warning(...) \
+    sampgdk_log_message(SAMPGDK_LOG_WARNING, __VA_ARGS__)
+#else
+  #define sampgdk_log_warning(...)
+#endif
+
+#if SAMPGDK_LOG_ERROR >= SAMPGDK_MIN_LOG_LEVEL
+  #define sampgdk_log_error(...) \
+    sampgdk_log_message(SAMPGDK_LOG_ERROR, __VA_ARGS__)
+#else
+  #define sampgdk_log_error(...)
+#endif
+
+void sampgdk_log_message(int level, const char *format, ...);
 
 #endif /* !SAMPGDK_INTERNAL_LOG_H */
 
@@ -140,6 +183,8 @@ void sampgdk_log_error(const char *format, ...);
 #define SAMPGDK_INTERNAL_LOGPRINTF_H
 
 #include <stdarg.h>
+
+#define SAMPGDK_LOGPRINTF_BUFFER_SIZE 1024
 
 typedef void (*logprintf_t)(const char *format, ...);
 
@@ -260,13 +305,11 @@ void sampgdk_module_cleanup(void) {
 
 /* #include "array.h" */
 
-static void *_sampgdk_array_get_elem_ptr(struct sampgdk_array *a,
-                                         int index) {
+static void *_sampgdk_array_get_elem_ptr(struct sampgdk_array *a, int index) {
   return (unsigned char *)a->data + (index * a->elem_size);
 }
 
-static int _sampgdk_array_normalize_index(struct sampgdk_array *a,
-                                          int index) {
+static int _sampgdk_array_normalize_index(struct sampgdk_array *a, int index) {
   if (index >= 0) {
     return index;
   } else {
@@ -410,10 +453,14 @@ int sampgdk_array_insert(struct sampgdk_array *a,
 
   if (need_count > 0) {
     int error;
+    int need_size = a->size + need_count;
 
-    if ((error = sampgdk_array_resize(a, a->size + need_count)) < 0) {
-      return error;
-    }
+    do {
+      error = sampgdk_array_grow(a);
+      if (error < 0) {
+        return error;
+      }
+    } while (a->size < need_size);
   }
 
   if (move_count > 0) {
@@ -481,7 +528,7 @@ int sampgdk_array_append(struct sampgdk_array *a, void *elem) {
 
 int sampgdk_array_get_index(struct sampgdk_array *a, void *elem) {
   assert(elem != NULL);
-  return ((unsigned char *)elem - (unsigned char *)a->data) / a->elem_size;
+  return (int)(((unsigned char *)elem - (unsigned char *)a->data) / a->elem_size);
 }
 
 int sampgdk_array_find(struct sampgdk_array *a,
@@ -541,20 +588,15 @@ void **sampgdk_plugin_get_plugins(int *number);
 
 #include <assert.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "sampgdk.h"
 
 /* #include "init.h" */
+/* #include "log.h" */
 /* #include "logprintf.h" */
-
-enum _sampgdk_log_level {
-  _SAMPGDK_LOG_DEBUG,
-  _SAMPGDK_LOG_INFO,
-  _SAMPGDK_LOG_WARNING,
-  _SAMPGDK_LOG_ERROR
-};
 
 static bool _sampgdk_log_enabled[] = {
   false, /* _SAMPGDK_LOG_DEBUG */
@@ -581,16 +623,16 @@ static void _sampgdk_log_init_enabled() {
         op = c;
         break;
       case 'd':
-        level = _SAMPGDK_LOG_DEBUG;
+        level = SAMPGDK_LOG_DEBUG;
         break;
       case 'i':
-        level = _SAMPGDK_LOG_INFO;
+        level = SAMPGDK_LOG_INFO;
         break;
       case 'w':
-        level = _SAMPGDK_LOG_WARNING;
+        level = SAMPGDK_LOG_WARNING;
         break;
       case 'e':
-        level = _SAMPGDK_LOG_ERROR;
+        level = SAMPGDK_LOG_ERROR;
         break;
     }
 
@@ -613,119 +655,52 @@ SAMPGDK_MODULE_CLEANUP(log) {
   /* nothing to do here */
 }
 
-static void _sampgdk_log_message(int level, const char *format, va_list args) {
-  const char *level_string;
-  char *real_format;
+void sampgdk_log_message(int level, const char *format, ...) {
+  va_list args;
+  char level_char;
+  char log_format_buf[SAMPGDK_LOGPRINTF_BUFFER_SIZE];
 
-  assert(level >= _SAMPGDK_LOG_DEBUG &&
-         level <= _SAMPGDK_LOG_ERROR);
+  assert(level >= SAMPGDK_LOG_DEBUG &&
+         level <= SAMPGDK_LOG_ERROR);
 
   if (!_sampgdk_log_enabled[level]) {
     return;
   }
 
   switch (level) {
-    case _SAMPGDK_LOG_DEBUG:
-      level_string = "debug";
+    case SAMPGDK_LOG_DEBUG:
+      level_char = 'd';
       break;
-    case _SAMPGDK_LOG_INFO:
-      level_string = "info";
+    case SAMPGDK_LOG_INFO:
+      level_char = 'i';
       break;
-    case _SAMPGDK_LOG_WARNING:
-      level_string = "warning";
+    case SAMPGDK_LOG_WARNING:
+      level_char = 'w';
       break;
-    case _SAMPGDK_LOG_ERROR:
-      level_string = "error";
+    case SAMPGDK_LOG_ERROR:
+      level_char = 'e';
       break;
     default:
-      level_string = "";
+      return;
   }
-
-  real_format = (char *)malloc(
-    sizeof("[sampgdk:] ") - 1
-    + strlen(level_string)
-    + strlen(format)
-    + 1
-  );
-  if (real_format == NULL) {
-    return;
-  }
-
-  strcpy(real_format, "[sampgdk:");
-  strcat(real_format, level_string);
-  strcat(real_format, "] ");
-  strcat(real_format, format);
-
-  sampgdk_do_vlogprintf(real_format, args);
-
-  free(real_format);
-}
-
-void sampgdk_log_debug(const char *format, ...) {
-  va_list args;
-  va_start(args, format);
-  _sampgdk_log_message(_SAMPGDK_LOG_DEBUG, format, args);
-  va_end(args);
-}
-
-void sampgdk_log_info(const char *format, ...) {
-  va_list args;
-  va_start(args, format);
-  _sampgdk_log_message(_SAMPGDK_LOG_INFO, format, args);
-  va_end(args);
-}
-
-void sampgdk_log_warning(const char *format, ...) {
-  va_list args;
-  va_start(args, format);
-  _sampgdk_log_message(_SAMPGDK_LOG_WARNING, format, args);
-  va_end(args);
-}
-
-void sampgdk_log_error(const char *format, ...) {
-  va_list args;
-  va_start(args, format);
-  _sampgdk_log_message(_SAMPGDK_LOG_ERROR, format, args);
-  va_end(args);
-}
-
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-
-#include "sampgdk.h"
-
-/* #include "logprintf.h" */
-
-#define _SAMPGDK_LOGPRINTF_BUFFER_SIZE 1024
 
 #ifdef _MSC_VER
-  #define vsnprintf vsprintf_s
+  _snprintf(
+#else
+  snprintf(
 #endif
-
-/*
- * Gets called instead of the real logprintf when the library has not been
- * initialized yet. See the declaration of sampgdk_logprintf_impl.
- */
-static void _sampgdk_logprintf_stub(const char *format, ...) {
-  va_list va;
-
-  va_start(va, format);
-  vprintf(format, va);
-  va_end(va);
-
-  printf("\n");
-}
-
-logprintf_t sampgdk_logprintf_impl = &_sampgdk_logprintf_stub;
-
-void sampgdk_do_vlogprintf(const char *format, va_list va) {
-  char buffer[_SAMPGDK_LOGPRINTF_BUFFER_SIZE];
-
-  vsnprintf(buffer, sizeof(buffer), format, va);
-  buffer[sizeof(buffer) - 1] = '\0';
-
-  sampgdk_logprintf_impl("%s", buffer);
+      log_format_buf,
+      sizeof(log_format_buf),
+      "[sampgdk:%c] %s",
+      level_char,
+      format);
+#ifdef _MSC_VER
+  /* _snprintf does not insert a terminating NUL if the buffer is too small */
+  log_format_buf[sizeof(log_format_buf) - 1] = '\0';
+#endif
+  va_start(args, format);
+  sampgdk_do_vlogprintf(log_format_buf, args);
+  va_end(args);
 }
 
 #include <errno.h>
@@ -747,17 +722,34 @@ void sampgdk_do_vlogprintf(const char *format, va_list va) {
 /* #include "hook.h" */
 /* #include "types.h" */
 
-#define _SAMPGDK_HOOK_JMP_SIZE 5
+#ifdef SAMPGDK_64BIT
+#  define _SAMPGDK_HOOK_JMP_SIZE 14
+#else
+#  define _SAMPGDK_HOOK_JMP_SIZE 5
+#endif
 #define _SAMPGDK_HOOK_MAX_INSN_LEN 15
+/* Trampoline must hold: copied instructions (up to JMP_SIZE-1+MAX_INSN_LEN)
+ * + back-jump (JMP_SIZE).  The original formula (JMP_SIZE+MAX_INSN_LEN-1)
+ * never accounted for the back-jump. */
 #define _SAMPGDK_HOOK_TRAMPOLINE_SIZE \
-  (_SAMPGDK_HOOK_JMP_SIZE + _SAMPGDK_HOOK_MAX_INSN_LEN - 1)
+  (_SAMPGDK_HOOK_JMP_SIZE * 2 + _SAMPGDK_HOOK_MAX_INSN_LEN - 1)
 
 #pragma pack(push, 1)
 
+#ifdef SAMPGDK_64BIT
+/* FF 25 00 00 00 00 = jmp [rip+0] (6B) + 8B absolute address */
 struct _sampgdk_hook_jmp {
-  uint8_t opcode;
+  uint8_t  opcode;    /* 0xFF */
+  uint8_t  modrm;     /* 0x25 */
+  int32_t  disp;      /* 0 */
+  uintptr_t target;   /* 8-byte absolute address */
+};
+#else
+struct _sampgdk_hook_jmp {
+  uint8_t opcode;     /* 0xE9 */
   int32_t offset;
 };
+#endif
 
 #pragma pack(pop)
 
@@ -783,7 +775,7 @@ static void *_sampgdk_hook_unprotect(void *address, size_t size) {
   long pagesize;
 
   pagesize = sysconf(_SC_PAGESIZE);
-  address = (void *)((long)address & ~(pagesize - 1));
+  address = (void *)((uintptr_t)address & ~((uintptr_t)(pagesize - 1)));
 
   if (mprotect(address, size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
     return NULL;
@@ -795,118 +787,353 @@ static void *_sampgdk_hook_unprotect(void *address, size_t size) {
 #endif /* !SAMPGDK_WINDOWS */
 
 static size_t _sampgdk_hook_disasm(uint8_t *code, int *reloc) {
-  enum flags {
-    MODRM      = 1,
-    REG_OPCODE = 1 << 1,
-    IMM8       = 1 << 2,
-    IMM16      = 1 << 3,
-    IMM32      = 1 << 4,
-    PLUS_R     = 1 << 5,
-    RELOC      = 1 << 6
-  };
-
-  static int prefixes[] = {
-    0xF0, 0xF2, 0xF3,
-    0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65,
-    0x66,
-    0x67
-  };
-
-  struct opcode_info {
-    int opcode;
-    int reg_opcode;
-    int flags;
-  };
-
-  static struct opcode_info opcodes[] = {
-    /* CALL rel32       */ {0xE8, 0, IMM32 | RELOC},
-    /* CALL r/m32       */ {0xFF, 2, MODRM | REG_OPCODE},
-    /* JMP rel32        */ {0xE9, 0, IMM32 | RELOC},
-    /* JMP r/m32        */ {0xFF, 4, MODRM | REG_OPCODE},
-    /* LEA r16,m        */ {0x8D, 0, MODRM},
-    /* MOV r/m8,r8      */ {0x88, 0, MODRM},
-    /* MOV r/m32,r32    */ {0x89, 0, MODRM},
-    /* MOV r8,r/m8      */ {0x8A, 0, MODRM},
-    /* MOV r32,r/m32    */ {0x8B, 0, MODRM},
-    /* MOV r/m16,Sreg   */ {0x8C, 0, MODRM},
-    /* MOV Sreg,r/m16   */ {0x8E, 0, MODRM},
-    /* MOV AL,moffs8    */ {0xA0, 0, IMM8},
-    /* MOV EAX,moffs32  */ {0xA1, 0, IMM32},
-    /* MOV moffs8,AL    */ {0xA2, 0, IMM8},
-    /* MOV moffs32,EAX  */ {0xA3, 0, IMM32},
-    /* MOV r8, imm8     */ {0xB0, 0, PLUS_R | IMM8},
-    /* MOV r32, imm32   */ {0xB8, 0, PLUS_R | IMM32},
-    /* MOV r/m8, imm8   */ {0xC6, 0, MODRM | REG_OPCODE | IMM8},
-    /* MOV r/m32, imm32 */ {0xC7, 0, MODRM | REG_OPCODE | IMM32},
-    /* POP r/m32        */ {0x8F, 0, MODRM | REG_OPCODE},
-    /* POP r32          */ {0x58, 0, PLUS_R},
-    /* PUSH r/m32       */ {0xFF, 6, MODRM | REG_OPCODE},
-    /* PUSH r32         */ {0x50, 0, PLUS_R},
-    /* PUSH imm8        */ {0x6A, 0, IMM8},
-    /* PUSH imm32       */ {0x68, 0, IMM32},
-    /* RET              */ {0xC3, 0, 0},
-    /* RET imm16        */ {0xC2, 0, IMM16},
-    /* SUB r/m32, imm8  */ {0x83, 5, MODRM | REG_OPCODE | IMM8},
-    /* SUB r/m32, r32   */ {0x29, 0, MODRM},
-    /* SUB r32, r/m32   */ {0x2B, 0, MODRM}
-  };
-
-  int i;
+  /* Length-only disassembler for x86/x64.
+   * Derives instruction length from encoding rules, not from an opcode table.
+   * Based on the standard approach used by Detours/mhook etc.
+   */
   int len = 0;
-  int opcode = 0;
+#ifdef SAMPGDK_64BIT
+  int rex = 0;
+#endif
 
-  for (i = 0; i < sizeof(prefixes) / sizeof(*prefixes); i++) {
-    if (code[len] == prefixes[i]) {
+  /* Consume legacy prefixes */
+  while (1) {
+    uint8_t b = code[len];
+    /* LOCK/REPNE/REPE */  if (b == 0xF0 || b == 0xF2 || b == 0xF3) { len++; continue; }
+    /* CS/SS/DS/ES/FS/GS */ if (b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) { len++; continue; }
+    /* Operand-size override */ if (b == 0x66) { len++; continue; }
+    /* Address-size override */ if (b == 0x67) { len++; continue; }
+    break;
+  }
+
+#ifdef SAMPGDK_64BIT
+  /* REX prefix (0x40-0x4F) */
+  if ((code[len] & 0xF0) == 0x40) {
+    rex = code[len] & 0x0F;  /* save full REX for W bit */
+    len++;
+  }
+#endif
+
+  /* Check for 3-byte opcode (VEX/EVEX-like): 0x62 = EVEX, 0xC4/C5 = VEX */
+  /* 0x62: EVEX prefix (4 bytes total). Skip the prefix bytes. */
+  if (code[len] == 0x62) {
+    /* EVEX: 62 + P0 + P1 + opcode */
+    len += 3;  /* +3 for the EVEX prefix bytes after the 62 */
+    /* Then the actual opcode follows - we'll fall through to handle it */
+    /* But EVEX instructions still have ModRM etc., so continue */
+  }
+  /* 0xC4: VEX 3-byte, 0xC5: VEX 2-byte */
+  if (code[len] == 0xC4) {
+    len += 2; /* skip VEX.2 + VEX.3 */
+  }
+  if (code[len] == 0xC5) {
+    len += 1; /* skip VEX.2 */
+  }
+
+  /* XOP prefix (0x8F with reg_opcode=0) - rare, but skip it */
+  if (code[len] == 0x8F && ((code[len + 1] >> 3) & 7) == 0) {
+    len += 2; /* skip XOP.2 + XOP.3 */
+  }
+
+  /* Check for 2-byte opcode (0x0F prefix) */
+  int two_byte = 0;
+  if (code[len] == 0x0F) {
+    two_byte = 1;
+    len++;
+    /* 0x0F 0x38 or 0x0F 0x3A = 3-byte opcode */
+    if (code[len] == 0x38 || code[len] == 0x3A) {
       len++;
     }
   }
 
-  for (i = 0; i < sizeof(opcodes) / sizeof(*opcodes); i++) {
-    bool found = false;
+  /* Read the primary opcode byte */
+  int opcode = code[len++];
 
-    if (code[len] == opcodes[i].opcode) {
-      found = !(opcodes[i].flags & REG_OPCODE)
-            || ((code[len + 1] >> 3) & 7) == opcodes[i].reg_opcode;
-    }
-    if ((opcodes[i].flags & PLUS_R)
-        && (code[len] & 0xF8) == opcodes[i].opcode) {
-      found = true;
-    }
+  /* Determine if this instruction has ModRM.
+   * On x86/x64, most opcodes have ModRM. The exceptions are:
+   * - Opcodes 0x00-0x03: ADD/OR/ADC/SBB with ModRM (actually all have ModRM up to 0x3F)
+   * - Actually, most opcodes have ModRM. The few that don't:
+   *   0x40-0x4F: INC/DEC (x86) / REX prefix (x64 - already handled)
+   *   0x50-0x5F: PUSH/POP r32 (PLUS_R style, no ModRM)
+   *   0x60-0x6F: various (some have ModRM, some don't)
+   *   0x70-0x7F: Jcc rel8 (no ModRM)
+   *   0x90-0x97: XCHG/NOP (no ModRM)
+   *   0x98-0x9F: various flags/convert (no ModRM)
+   *   0xA0-0xA7: MOV moffs (no ModRM, but AL/EAX specific)
+   *   0xA8-0xAF: TEST/STOS/LODS/SCAS (no ModRM)
+   *   0xB0-0xBF: MOV r8/r32, imm (PLUS_R style, no ModRM)
+   *   0xC0-0xC1: Shift/rotate r/m8/32, imm8 (ModRM)
+   *   0xC2-0xC3: RET (no ModRM)
+   *   0xC4-0xC5: LES/LDS / VEX prefix (no ModRM)
+   *   0xC6-0xC7: MOV r/m8/32, imm (ModRM)
+   *   0xC8-0xC9: ENTER/LEAVE (no ModRM)
+   *   0xCA-0xCB: RET far (no ModRM)
+   *   0xCC-0xCE: INT/INTO/IRET (no ModRM)
+   *   0xD0-0xD3: Shift/rotate r/m8/32 (ModRM)
+   *   0xD4-0xD5: AAM/AAD (no ModRM)
+   *   0xD6: SETALC (undocumented, no ModRM)
+   *   0xD7: XLAT (no ModRM)
+   *   0xE0-0xE3: LOOP/JCXZ (no ModRM)
+   *   0xE4-0xE7: IN/OUT (no ModRM)
+   *   0xE8-0xE9: CALL/JMP rel (no ModRM)
+   *   0xEA-0xEB: JMP far / JMP rel8 (no ModRM)
+   *   0xEC-0xEF: IN/OUT (no ModRM)
+   *   0xF0-0xF3: LOCK/REP prefixes (already consumed)
+   *   0xF4: HLT (no ModRM)
+   *   0xF5: CMC (no ModRM)
+   *   0xF6-0xF7: Group3 (ModRM)
+   *   0xF8-0xFD: CLC/STC/CLI/STI/CLD/STD (no ModRM)
+   *   0xFE-0xFF: Group4/5 (ModRM)
+   */
 
-    if (found) {
-      opcode = code[len++];
-      break;
+  int has_modrm = 1;  /* default: most instructions have ModRM */
+  int imm_size = 0;
+  int reloc_offset = 0;
+
+  /* Determine ModRM and immediate based on opcode */
+  /* Single-byte opcodes (not 0x0F prefix) */
+  if (!two_byte) {
+    if ((opcode >= 0x00 && opcode <= 0x03) ||  /* ADD/OR/ADC/SBB r/m8,r8 etc */
+        (opcode >= 0x08 && opcode <= 0x0B) ||  /* OR/ADC/SBB/AND r/m8,r8 */
+        (opcode >= 0x10 && opcode <= 0x13) ||  /* ADC/SBB/AND/SUB r/m8,r8 */
+        (opcode >= 0x18 && opcode <= 0x1B) ||  /* SBB/AND/SUB/XOR r/m8,r8 */
+        (opcode >= 0x20 && opcode <= 0x23) ||  /* AND/SUB/XOR/CMP r/m8,r8 */
+        (opcode >= 0x28 && opcode <= 0x2B) ||  /* SUB/XOR/CMP/ADD r/m8,r8 */
+        (opcode >= 0x30 && opcode <= 0x33) ||  /* XOR/CMP/ADD/OR r/m8,r8 */
+        (opcode >= 0x38 && opcode <= 0x3B) ||  /* CMP/ADD/OR/ADC r/m8,r8 */
+        opcode == 0x08 || opcode == 0x09 ||    /* OR r/m8,r8 / OR r/m32,r32 */
+        opcode == 0x0A || opcode == 0x0B ||
+        opcode == 0x1C || opcode == 0x1D ||    /* SBB AL/EAX, imm */
+        opcode == 0x2C || opcode == 0x2D ||    /* SUB AL/EAX, imm */
+        opcode == 0x34 || opcode == 0x35 ||    /* XOR AL/EAX, imm */
+        opcode == 0x3C || opcode == 0x3D) {    /* CMP AL/EAX, imm */
+      has_modrm = 0;
+      /* Some of these are AL/EAX imm forms: 0x04/0x05, 0x0C/0x0D, 0x14/0x15, 0x1C/0x1D, 0x24/0x25, 0x2C/0x2D, 0x34/0x35, 0x3C/0x3D */
+      if ((opcode & 0xFD) == 0x04 || (opcode & 0xFD) == 0x0C || (opcode & 0xFD) == 0x14 ||
+          (opcode & 0xFD) == 0x1C || (opcode & 0xFD) == 0x24 || (opcode & 0xFD) == 0x2C ||
+          (opcode & 0xFD) == 0x34 || (opcode & 0xFD) == 0x3C) {
+        if (opcode & 1) imm_size = 4; /* imm32 for EAX forms */
+        else imm_size = 1;            /* imm8 for AL forms */
+      }
+    }
+    else if ((opcode >= 0x06 && opcode <= 0x07) ||  /* PUSH/POP ES (x86) */
+             (opcode >= 0x0E && opcode <= 0x0F) ||  /* PUSH/POP CS (x86) / 0x0F is 2-byte prefix! */
+             (opcode >= 0x16 && opcode <= 0x17) ||  /* PUSH/POP SS */
+             (opcode >= 0x1E && opcode <= 0x1F)) {  /* PUSH/POP DS */
+      has_modrm = 0; /* segment register push/pop, 1 byte */
+    }
+    else if (opcode >= 0x40 && opcode <= 0x4F) {
+      has_modrm = 0; /* INC/DEC r32 (x86) - on x64 these are REX prefixes, already handled */
+    }
+    else if (opcode >= 0x50 && opcode <= 0x5F) {
+      has_modrm = 0; /* PUSH/POP r32 */
+    }
+    else if (opcode >= 0x60 && opcode <= 0x6F) {
+      if (opcode == 0x60 || opcode == 0x61) {
+        has_modrm = 0; /* PUSHA/POPA (x86) */
+      } else if (opcode == 0x62) {
+        has_modrm = 0; /* BOUND (x86) / EVEX prefix */
+      } else if (opcode == 0x63) {
+        has_modrm = 1; /* MOVSXD (x64) / ARPL (x86) */
+      } else if (opcode == 0x68 || opcode == 0x6A) {
+        has_modrm = 0;
+        imm_size = (opcode == 0x68) ? 4 : 1; /* PUSH imm32/imm8 */
+      } else if (opcode == 0x69 || opcode == 0x6B) {
+        has_modrm = 1;
+        imm_size = (opcode == 0x69) ? 4 : 1; /* IMUL r32,r/m32,imm32/imm8 */
+      } else {
+        has_modrm = 0; /* 0x64/0x65 FS/GS prefixes, 0x66/0x67 overrides - already consumed above! */
+      }
+    }
+    else if (opcode >= 0x70 && opcode <= 0x7F) {
+      has_modrm = 0;
+      imm_size = 1; /* Jcc rel8 */
+    }
+    else if (opcode >= 0x80 && opcode <= 0x83) {
+      has_modrm = 1; /* Group1 r/m, imm8/32 */
+      imm_size = (opcode == 0x80 || opcode == 0x82) ? 1 : (opcode == 0x81 ? 4 : 1);
+    }
+    else if (opcode == 0x84 || opcode == 0x85) {
+      has_modrm = 1; /* TEST r/m8,r8 / TEST r/m32,r32 */
+    }
+    else if (opcode == 0x86 || opcode == 0x87) {
+      has_modrm = 1; /* XCHG r8,r/m8 / XCHG r32,r/m32 */
+    }
+    else if (opcode >= 0x88 && opcode <= 0x8F) {
+      has_modrm = 1; /* MOV/LEA/POP various */
+      if (opcode == 0x8D) has_modrm = 1; /* LEA */
+      if (opcode == 0x8F) has_modrm = 1; /* POP r/m32 */
+    }
+    else if (opcode >= 0x90 && opcode <= 0x97) {
+      has_modrm = 0; /* NOP/XCHG */
+    }
+    else if (opcode >= 0x98 && opcode <= 0x9F) {
+      has_modrm = 0; /* CBW/CWD/CDQ/CWDE/CDQE/WAIT/PUSHF/POPF/SAHF/LAHF */
+    }
+    else if (opcode >= 0xA0 && opcode <= 0xA7) {
+      has_modrm = 0; /* MOV moffs / MOVS/CMPS */
+      if (opcode >= 0xA0 && opcode <= 0xA3) {
+        imm_size = (opcode & 1) ? 4 : 1; /* MOV AL/EAX, moffs / MOV moffs, AL/EAX */
+      }
+    }
+    else if (opcode >= 0xA8 && opcode <= 0xAF) {
+      has_modrm = 0; /* TEST AL/EAX, imm / STOS/SCAS/LODS */
+      if (opcode == 0xA8 || opcode == 0xA9) {
+        imm_size = (opcode == 0xA9) ? 4 : 1; /* TEST AL/EAX, imm */
+      }
+    }
+    else if (opcode >= 0xB0 && opcode <= 0xBF) {
+      has_modrm = 0; /* MOV r8/r32, imm8/imm32 */
+      if (opcode >= 0xB0 && opcode <= 0xB7) imm_size = 1;
+      else imm_size = 4;
+    }
+    else if (opcode >= 0xC0 && opcode <= 0xC1) {
+      has_modrm = 1; imm_size = 1; /* Shift/rotate r/m8/32, imm8 */
+    }
+    else if (opcode >= 0xC2 && opcode <= 0xC3) {
+      has_modrm = 0;
+      if (opcode == 0xC2) imm_size = 2; /* RET imm16 */
+    }
+    else if (opcode == 0xC4 || opcode == 0xC5) {
+      has_modrm = 0; /* LES/LDS (x86) / VEX prefix - already handled above */
+    }
+    else if (opcode >= 0xC6 && opcode <= 0xC7) {
+      has_modrm = 1;
+      imm_size = (opcode == 0xC6) ? 1 : 4; /* MOV r/m8,imm8 / MOV r/m32,imm32 */
+    }
+    else if (opcode >= 0xC8 && opcode <= 0xCF) {
+      has_modrm = 0;
+      if (opcode == 0xC8) imm_size = 4; /* ENTER imm16,imm8 */
+    }
+    else if (opcode >= 0xD0 && opcode <= 0xD3) {
+      has_modrm = 1; /* Shift/rotate r/m, 1/CL/imm8 */
+    }
+    else if (opcode >= 0xD4 && opcode <= 0xD7) {
+      has_modrm = 0; /* AAM/AAD/SETALC/XLAT */
+      if (opcode == 0xD4 || opcode == 0xD5) imm_size = 1; /* AAM/AAD imm8 */
+    }
+    else if (opcode >= 0xD8 && opcode <= 0xDF) {
+      has_modrm = 1; /* FPU instructions */
+    }
+    else if (opcode >= 0xE0 && opcode <= 0xE3) {
+      has_modrm = 0; imm_size = 1; /* LOOP/JCXZ rel8 */
+    }
+    else if (opcode == 0xE4 || opcode == 0xE5) {
+      has_modrm = 0; imm_size = 1; /* IN AL/EAX, imm8 */
+    }
+    else if (opcode == 0xE6 || opcode == 0xE7) {
+      has_modrm = 0; imm_size = 1; /* OUT imm8, AL/EAX */
+    }
+    else if (opcode == 0xE8) {
+      has_modrm = 0; imm_size = 4; reloc_offset = len; /* CALL rel32 */
+    }
+    else if (opcode == 0xE9) {
+      has_modrm = 0; imm_size = 4; reloc_offset = len; /* JMP rel32 */
+    }
+    else if (opcode == 0xEA || opcode == 0xEB) {
+      has_modrm = 0;
+      imm_size = (opcode == 0xEB) ? 1 : 0; /* JMP far / JMP rel8 */
+    }
+    else if (opcode >= 0xEC && opcode <= 0xEF) {
+      has_modrm = 0; /* IN/OUT AL/EAX, DX */
+    }
+    else if (opcode == 0xF1) {
+      has_modrm = 0; /* INT1/ICEBP */
+    }
+    else if (opcode == 0xF4) {
+      has_modrm = 0; /* HLT */
+    }
+    else if (opcode == 0xF5) {
+      has_modrm = 0; /* CMC */
+    }
+    else if (opcode >= 0xF6 && opcode <= 0xF7) {
+      has_modrm = 1;
+      /* Group3: reg field determines if imm is present */
+      /* /0 (TEST) has imm, /2-/7 (NOT/NEG/MUL/IMUL/DIV/IDIV) don't */
+      /* But for length estimation, always assume imm is present */
+      imm_size = (opcode == 0xF7) ? 4 : 1;
+    }
+    else if (opcode >= 0xF8 && opcode <= 0xFD) {
+      has_modrm = 0; /* CLC/STC/CLI/STI/CLD/STD */
+    }
+    else if (opcode >= 0xFE && opcode <= 0xFF) {
+      has_modrm = 1; /* Group4/5 (INC/DEC/CALL/JMP r/m) */
+    }
+  } else {
+    /* 0x0F-prefixed (two-byte) opcodes */
+    /* Most 0x0F-prefixed opcodes have ModRM. Exceptions: */
+    if (opcode == 0x31 || opcode == 0x32 ||  /* RDTSC/RDTSCP */
+        opcode == 0x33 || opcode == 0x34 ||  /* RDMSR/SYSENTER */
+        opcode == 0x35 || opcode == 0x37 ||  /* SYSEXIT/GETSEC */
+        opcode == 0x05 || opcode == 0x06 ||  /* SYSCALL/SYS RET */
+        opcode == 0x01 || opcode == 0x02 ||  /* SGDT/SIDT/LGDT/LIDT/SMSW */
+        opcode == 0x08 || opcode == 0x09 ||  /* INVD/WBINVD */
+        opcode == 0x0B || opcode == 0x0D ||  /* UD2/PREFETCH */
+        opcode == 0x0E || opcode == 0x0F ||
+        opcode == 0x30 || opcode == 0x77 ||  /* WRMSR/EMMS */
+        opcode == 0x7F || opcode == 0x90 ||  /* SFENCE/PAUSE */
+        opcode == 0x92 || opcode == 0x93 ||
+        opcode == 0xA0 || opcode == 0xA1 ||  /* PUSH/POP FS */
+        opcode == 0xA8 || opcode == 0xA9 ||  /* PUSH/POP GS */
+        opcode == 0x06 || opcode == 0x07) {  /* CLTS/LOADALL */
+      has_modrm = 0;
+    } else {
+      has_modrm = 1;
+      /* 0x0F-prefix Jcc with rel32: 0x80-0x8F */
+      if (opcode >= 0x80 && opcode <= 0x8F) {
+        imm_size = 4; /* Jcc rel32 */
+        reloc_offset = len;
+      }
+      /* 0x0F-prefix Jcc with rel8: 0x70-0x7F */
+      if (opcode >= 0x70 && opcode <= 0x7F) {
+        imm_size = 1; /* Jcc rel8 */
+      }
+      /* SETcc r/m8: 0x90-0x9F */
+      if (opcode >= 0x90 && opcode <= 0x9F) {
+        has_modrm = 1;
+      }
     }
   }
 
-  if (opcode == 0) {
-    return 0;
-  }
-
-  if (reloc != NULL && opcodes[i].flags & RELOC) {
-    *reloc = len; /* relative call or jump */
-  }
-
-  if (opcodes[i].flags & MODRM) {
+  /* Parse ModRM if present */
+  if (has_modrm) {
     int modrm = code[len++];
     int mod = modrm >> 6;
     int rm = modrm & 7;
 
     if (mod != 3 && rm == 4) {
-      len++; /* for SIB */
+      len++; /* SIB byte */
     }
 
-    if (mod == 1) len += 1; /* [reg + disp8] */
-    if (mod == 2) len += 4; /* [reg + disp32] */
-
-    if (mod == 0 && rm == 5) {
-      len += 4; /* [disp32] */
+    if (mod == 1) {
+      len += 1; /* disp8 */
+    } else if (mod == 2) {
+      len += 4; /* disp32 */
+    } else if (mod == 0 && rm == 5) {
+      /* RIP-relative on x64, or absolute disp32 on x86 */
+      len += 4; /* disp32 */
     }
   }
 
-  if (opcodes[i].flags & IMM8)  len += 1;
-  if (opcodes[i].flags & IMM16) len += 2;
-  if (opcodes[i].flags & IMM32) len += 4;
+  /* Add immediate */
+  if (imm_size == 1) {
+    len += 1;
+  } else if (imm_size == 2) {
+    len += 2;
+  } else if (imm_size == 4) {
+#ifdef SAMPGDK_64BIT
+    /* MOV r64, imm64 (opcode B8-BF with REX.W) */
+    if (rex & 0x08 && !two_byte && opcode >= 0xB8 && opcode <= 0xBF) {
+      len += 8;
+    } else
+#endif
+    len += 4;
+  }
+
+  /* Set relocation offset for relative CALL/JMP */
+  if (reloc != NULL && reloc_offset > 0) {
+    *reloc = reloc_offset;
+  }
 
   return len;
 }
@@ -914,8 +1141,15 @@ static size_t _sampgdk_hook_disasm(uint8_t *code, int *reloc) {
 static void _sampgdk_hook_write_jmp(void *src, void *dst, int32_t offset) {
   struct _sampgdk_hook_jmp jmp;
 
+#ifdef SAMPGDK_64BIT
+  jmp.opcode = 0xFF;
+  jmp.modrm  = 0x25;
+  jmp.disp   = 0;
+  jmp.target = (uintptr_t)dst;
+#else
   jmp.opcode = 0xE9;
-  jmp.offset = (uint8_t *)dst - ((uint8_t *)src + sizeof(jmp));
+  jmp.offset = (int32_t)((uint8_t *)dst - ((uint8_t *)src + sizeof(jmp)));
+#endif
 
   memcpy((uint8_t *)src + offset, &jmp, sizeof(jmp));
 }
@@ -940,7 +1174,8 @@ sampgdk_hook_t sampgdk_hook_new(void *src, void *dst) {
     int reloc = 0;
 
     if ((insn_len = _sampgdk_hook_disasm(insn, &reloc)) == 0) {
-      sampgdk_log_error("Unsupported instruction");
+      sampgdk_log_error("Unsupported instr at offset %zu (byte: 0x%02X), func=%p, JMP_SIZE=%d",
+                        orig_size, insn[0], src, _SAMPGDK_HOOK_JMP_SIZE);
       break;
     }
 
@@ -951,18 +1186,26 @@ sampgdk_hook_t sampgdk_hook_new(void *src, void *dst) {
      */
     if (reloc != 0) {
       int32_t *offset = (int32_t *)(hook->trampoline + orig_size + reloc);
-      *offset -= (intptr_t)hook->trampoline - (intptr_t)src;
+      *offset -= (int32_t)((intptr_t)hook->trampoline - (intptr_t)src);
     }
 
     orig_size += insn_len;
   }
 
-  if (insn_len > 0) {
-    _sampgdk_hook_write_jmp(hook->trampoline, src, orig_size);
-    _sampgdk_hook_write_jmp(src, dst, 0);
-  } else {
-    _sampgdk_hook_write_jmp(hook->trampoline, src, 0);
+  if (insn_len == 0) {
+    free(hook);
+    return NULL;
   }
+
+#ifdef SAMPGDK_64BIT
+  /* Absolute JMP (FF 25 + 8B addr): dst is used directly as target. */
+  _sampgdk_hook_write_jmp(hook->trampoline, (uint8_t *)src + orig_size, (int32_t)orig_size);
+#else
+  /* Relative JMP (E9 + rel32): formula is dst - (src_param + 5).
+   * To jump to src + orig_size, pass dst = src (not src + orig_size). */
+  _sampgdk_hook_write_jmp(hook->trampoline, src, (int32_t)orig_size);
+#endif
+  _sampgdk_hook_write_jmp(src, dst, 0);
 
   return hook;
 }
@@ -973,6 +1216,44 @@ void sampgdk_hook_free(sampgdk_hook_t hook) {
 
 void *sampgdk_hook_trampoline(sampgdk_hook_t hook) {
   return hook->trampoline;
+}
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "sampgdk.h"
+
+/* #include "logprintf.h" */
+
+/*
+ * Gets called instead of the real logprintf when the library has not been
+ * initialized yet. See the declaration of sampgdk_logprintf_impl.
+ */
+static void _sampgdk_logprintf_stub(const char *format, ...) {
+  va_list va;
+
+  va_start(va, format);
+  vprintf(format, va);
+  va_end(va);
+
+  printf("\n");
+}
+
+logprintf_t sampgdk_logprintf_impl = &_sampgdk_logprintf_stub;
+
+void sampgdk_do_vlogprintf(const char *format, va_list va) {
+  char buffer[SAMPGDK_LOGPRINTF_BUFFER_SIZE];
+
+#ifdef _MSC_VER
+  _vsnprintf(buffer, sizeof(buffer), format, va);
+  /* _vsnprintf does not insert a terminating NUL if the buffer is too small */
+  buffer[sizeof(buffer) - 1] = '\0';
+#else
+  vsnprintf(buffer, sizeof(buffer), format, va);
+#endif
+
+  sampgdk_logprintf_impl("%s", buffer);
 }
 
 #include <assert.h>
@@ -1073,107 +1354,6 @@ void *sampgdk_plugin_get_handle(void *address) {
 }
 
 #endif /* !SAMPGDK_WINDOWS */
-
-#ifndef SAMPGDK_INTERNAL_NATIVE_H
-#define SAMPGDK_INTERNAL_NATIVE_H
-
-#include <stdarg.h>
-
-#include "sampgdk.h"
-
-/* Register a native function in the internal natives table. */
-int sampgdk_native_register(const char *name, AMX_NATIVE func);
-
-AMX_NATIVE sampgdk_native_find(const char *name);
-AMX_NATIVE sampgdk_native_find_warn(const char *name);
-AMX_NATIVE sampgdk_native_find_stub(const char *name);
-AMX_NATIVE sampgdk_native_find_warn_stub(const char *name);
-AMX_NATIVE sampgdk_native_find_flexible(const char *name, AMX_NATIVE current);
-
-/* Returns all currently registered natives. */
-const AMX_NATIVE_INFO *sampgdk_native_get_natives(int *number);
-
-cell sampgdk_native_call(AMX_NATIVE native, cell *params);
-cell sampgdk_native_invoke(AMX_NATIVE native, const char *format, va_list args);
-cell sampgdk_native_invoke_array(AMX_NATIVE native, const char *format, void **args);
-
-#endif /* !SAMPGDK_NATIVE_H_ */
-
-#ifndef SAMPGDK_INTERNAL_FAKEAMX_H
-#define SAMPGDK_INTERNAL_FAKEAMX_H
-
-#include "sampgdk.h"
-
-/* Returns the global fake AMX instance. */
-AMX *sampgdk_fakeamx_amx(void);
-
-/* Changes the size of the fake AMX heap. Used in the amx_Allot() hook. */
-int sampgdk_fakeamx_resize_heap(int cells);
-
-/* Push a value onto the fake AMX heap. */
-int sampgdk_fakeamx_push(int cells, cell *address);
-int sampgdk_fakeamx_push_cell(cell value, cell *address);
-int sampgdk_fakeamx_push_float(float value, cell *address);
-int sampgdk_fakeamx_push_array(const cell *src, int size, cell *address);
-int sampgdk_fakeamx_push_string(const char *src, int *size, cell *address);
-void sampgdk_fakeamx_pop(cell address);
-
-/* Get stuff back from the heap. Usually used for output parameters. */
-void sampgdk_fakeamx_get_cell(cell address, cell *value);
-void sampgdk_fakeamx_get_bool(cell address, bool *value);
-void sampgdk_fakeamx_get_float(cell address, float *value);
-void sampgdk_fakeamx_get_array(cell address, cell *dest, int size);
-void sampgdk_fakeamx_get_string(cell address, char *dest, int size);
-
-#endif /* !SAMPGDK_INTERNAL_FAKEAMX_H */
-
-#ifndef SAMPGDK_INTERNAL_PARAM_H
-#define SAMPGDK_INTERNAL_PARAM_H
-
-#include "sampgdk.h"
-
-void sampgdk_param_get_cell(AMX *amx, int index, cell *param);
-void sampgdk_param_get_bool(AMX *amx, int index, bool *param);
-void sampgdk_param_get_float(AMX *amx, int index, float *param);
-void sampgdk_param_get_string(AMX *amx, int index, char **param);
-
-/* Returns pointer to the start of the parameter list. */
-cell *sampgdk_param_get_start(AMX *amx);
-
-#endif /* !SAMPGDK_INTERNAL_PARAM_H */
-
-#ifndef SAMPGDK_INTERNAL_CALLBACK_H
-#define SAMPGDK_INTERNAL_CALLBACK_H
-
-#include "sampgdk.h"
-
-/* Callback handler function. */
-typedef bool (*sampgdk_callback)(AMX *amx, void *func, cell *retval);
-
-/* Register and unregister a callback in the global callback table.
- *
- * This is usually done only from generated init and cleanup functions of a_*
- * modules. Currently the only module that defines callbacks is a_samp.
- */
-int sampgdk_callback_register(const char *name, sampgdk_callback handler);
-void sampgdk_callback_unregister(const char *name);
-
-/* Gets the name of the callback with the specified index,
- * similar to amx_GetPublic().
- */
-bool sampgdk_callback_get(int index, char **name);
-
-/* Executes the callback handler registered for the specified callback.
- *
- * The return value indicates whether the callback returned a "bad" value,
- * i.e. whether the gamemode is allowed to execute the associated public
- * function. This value is specified in the IDL files via the callback's
- * "badret" attribute.
- */
-bool sampgdk_callback_invoke(AMX *amx, const char *name,
-    int paramcount, cell *retval);
-
-#endif /* !SAMPGDK_INTERNAL_CALLBACK_H */
 
 #ifndef SAMPGDK_INTERNAL_AMX_H
 #define SAMPGDK_INTERNAL_AMX_H
@@ -1284,6 +1464,112 @@ extern struct sampgdk_amx_api *sampgdk_amx_api;
 
 #endif /* !SAMPGDK_INTERNAL_AMX_H */
 
+#ifndef SAMPGDK_INTERNAL_CALLBACK_H
+#define SAMPGDK_INTERNAL_CALLBACK_H
+
+#include "sampgdk.h"
+
+/* Callback handler function. */
+typedef bool (*sampgdk_callback)(AMX *amx, void *func, cell *retval);
+
+/* Register and unregister a callback in the global callback table.
+ *
+ * This is usually done only from generated init and cleanup functions of a_*
+ * modules. Currently the only module that defines callbacks is a_samp.
+ */
+int sampgdk_callback_register(const char *name, sampgdk_callback handler);
+void sampgdk_callback_unregister(const char *name);
+
+/* Gets the name of the callback with the specified index,
+ * similar to amx_GetPublic().
+ */
+bool sampgdk_callback_get(int index, char **name);
+
+/* Executes the callback handler registered for the specified callback.
+ *
+ * The return value indicates whether the callback returned a "bad" value,
+ * i.e. whether the gamemode is allowed to execute the associated public
+ * function. This value is specified in the IDL files via the callback's
+ * "badret" attribute.
+ */
+bool sampgdk_callback_invoke(AMX *amx, const char *name,
+    int paramcount, cell *retval);
+
+#endif /* !SAMPGDK_INTERNAL_CALLBACK_H */
+
+#ifndef SAMPGDK_INTERNAL_FAKEAMX_H
+#define SAMPGDK_INTERNAL_FAKEAMX_H
+
+#include "sampgdk.h"
+
+/* Returns the global fake AMX instance. */
+AMX *sampgdk_fakeamx_amx(void);
+
+/* Changes the size of the fake AMX heap. Used in the amx_Allot() hook. */
+int sampgdk_fakeamx_resize_heap(int cells);
+
+/* Push a value onto the fake AMX heap. */
+int sampgdk_fakeamx_push(int cells, cell *address);
+int sampgdk_fakeamx_push_cell(cell value, cell *address);
+int sampgdk_fakeamx_push_float(float value, cell *address);
+int sampgdk_fakeamx_push_array(const cell *src, int size, cell *address);
+int sampgdk_fakeamx_push_string(const char *src, int *size, cell *address);
+void sampgdk_fakeamx_pop(cell address);
+
+/* Get stuff back from the heap. Usually used for output parameters. */
+void sampgdk_fakeamx_get_cell(cell address, cell *value);
+void sampgdk_fakeamx_get_bool(cell address, bool *value);
+void sampgdk_fakeamx_get_float(cell address, float *value);
+void sampgdk_fakeamx_get_array(cell address, cell *dest, int size);
+void sampgdk_fakeamx_get_string(cell address, char *dest, int size);
+
+#endif /* !SAMPGDK_INTERNAL_FAKEAMX_H */
+
+#ifndef SAMPGDK_INTERNAL_NATIVE_H
+#define SAMPGDK_INTERNAL_NATIVE_H
+
+#include <stdarg.h>
+
+#include "sampgdk.h"
+
+/* Register a native function in the internal natives table. */
+int sampgdk_native_register(const char *name, AMX_NATIVE func);
+
+AMX_NATIVE sampgdk_native_find(const char *name);
+AMX_NATIVE sampgdk_native_find_warn(const char *name);
+AMX_NATIVE sampgdk_native_find_stub(const char *name);
+AMX_NATIVE sampgdk_native_find_warn_stub(const char *name);
+AMX_NATIVE sampgdk_native_find_flexible(const char *name, AMX_NATIVE current);
+
+/* Returns all currently registered natives. */
+const AMX_NATIVE_INFO *sampgdk_native_get_natives(int *number);
+
+cell sampgdk_native_call(AMX_NATIVE native, cell *params);
+cell sampgdk_native_invoke(AMX_NATIVE native, const char *format, va_list args);
+cell sampgdk_native_invoke_array(
+    AMX_NATIVE native, const char *format, void **args);
+
+#endif /* !SAMPGDK_INTERNAL_NATIVE_H */
+
+#ifndef SAMPGDK_INTERNAL_PARAM_H
+#define SAMPGDK_INTERNAL_PARAM_H
+
+#include "sampgdk.h"
+
+void sampgdk_param_get_cell(AMX *amx, int index, cell *param);
+void sampgdk_param_get_bool(AMX *amx, int index, bool *param);
+void sampgdk_param_get_float(AMX *amx, int index, float *param);
+void sampgdk_param_get_string(AMX *amx, int index, char **param);
+
+/* Returns pointer to the start of the parameter list. */
+cell *sampgdk_param_get_start(AMX *amx);
+
+#endif /* !SAMPGDK_INTERNAL_PARAM_H */
+
+/* #include "amx.h" */
+
+struct sampgdk_amx_api *sampgdk_amx_api;
+
 #ifndef SAMPGDK_INTERNAL_TIMER_H
 #define SAMPGDK_INTERNAL_TIMER_H
 
@@ -1302,652 +1588,6 @@ int sampgdk_timer_kill(int timerid);
 void sampgdk_timer_process_timers(void *plugin);
 
 #endif /* !SAMPGDK_INTERNAL_TIMER_H */
-
-#include "sampgdk.h"
-
-/* #include "internal/native.h" */
-
-SAMPGDK_API(const AMX_NATIVE_INFO *, sampgdk_GetNatives(int *number)) {
-  return sampgdk_native_get_natives(number);
-}
-
-SAMPGDK_API(AMX_NATIVE, sampgdk_FindNative(const char *name)) {
-  if (name != NULL) {
-    return sampgdk_native_find(name);
-  }
-  return NULL;
-}
-
-SAMPGDK_API(cell, sampgdk_CallNative(AMX_NATIVE native, cell *params)) {
-  return sampgdk_native_call(native, params);
-}
-
-SAMPGDK_API(cell, sampgdk_InvokeNative(AMX_NATIVE native,
-                                       const char *format, ...)) {
-  cell retval;
-  va_list args;
-
-  va_start(args, format);
-  retval = sampgdk_native_invoke(native, format, args);
-  va_end(args);
-
-  return retval;
-}
-
-SAMPGDK_API(cell, sampgdk_InvokeNativeV(AMX_NATIVE native,
-                                        const char *format, va_list args)) {
-  return sampgdk_native_invoke(native, format, args);
-}
-
-SAMPGDK_API(cell, sampgdk_InvokeNativeArray(AMX_NATIVE native,
-                                            const char *format, void **args)) {
-  return sampgdk_native_invoke_array(native, format, args);
-}
-
-#include <assert.h>
-#include <stddef.h>
-#include <stdlib.h>
-#include <string.h>
-
-/* #include "array.h" */
-/* #include "fakeamx.h" */
-/* #include "init.h" */
-/* #include "likely.h" */
-/* #include "native.h" */
-/* #include "log.h" */
-
-#define _SAMPGDK_NATIVE_MAX_ARGS     32
-#define _SAMPGDK_NATIVE_MAX_ARGS_SIZE 8  /* in bytes */
-
-static struct sampgdk_array _sampgdk_natives;
-
-SAMPGDK_MODULE_INIT(native) {
-  int error;
-  AMX_NATIVE_INFO null = {NULL, NULL};
-
-  error = sampgdk_array_new(&_sampgdk_natives,
-                            100,
-                            sizeof(AMX_NATIVE_INFO));
-  if (error < 0) {
-    return error;
-  }
-
-  return sampgdk_array_append(&_sampgdk_natives, &null);
-}
-
-SAMPGDK_MODULE_CLEANUP(native) {
-  sampgdk_array_free(&_sampgdk_natives);
-}
-
-int sampgdk_native_register(const char *name, AMX_NATIVE func) {
-  AMX_NATIVE old_func;
-  AMX_NATIVE_INFO info;
-  AMX_NATIVE_INFO *ptr;
-  int i;
-
-  info.name = name;
-  info.func = func;
-
-  assert(name != 0);
-
-  old_func = sampgdk_native_find(name);
-  if (old_func != NULL) {
-    return -1;
-  }
-
-  /* Keep natives ordered by name.
-   * This allows us to use binary search in sampgdk_native_find().
-   */
-  for (i = 0; i < _sampgdk_natives.count - 1; i++) {
-    ptr = (AMX_NATIVE_INFO *)sampgdk_array_get(&_sampgdk_natives, i);
-    if (strcmp(name, ptr->name) <= 0) {
-      break;
-    }
-  }
-
-  return sampgdk_array_insert(&_sampgdk_natives, i, 1, &info);
-}
-
-static int _sampgdk_native_compare_bsearch(const void *key,
-                                           const void *elem) {
-  assert(key != NULL);
-  assert(elem != NULL);
-  return strcmp((const char *)key, ((const AMX_NATIVE_INFO *)elem)->name);
-}
-
-AMX_NATIVE sampgdk_native_find(const char *name) {
-  AMX_NATIVE_INFO *info;
-
-  assert(name != NULL);
-
-  if (_sampgdk_natives.data == NULL) {
-    /* Perhaps they forgot to initialize? */
-    return NULL;
-  }
-
-  info = (AMX_NATIVE_INFO *)bsearch(name,
-                                    _sampgdk_natives.data,
-                                    _sampgdk_natives.count - 1,
-                                    _sampgdk_natives.elem_size,
-                                    _sampgdk_native_compare_bsearch);
-  if (info == NULL) {
-    return NULL;
-  }
-
-  return info->func;
-}
-
-AMX_NATIVE sampgdk_native_find_warn(const char *name) {
-  AMX_NATIVE func;
-
-  assert(name != NULL);
-
-  func = sampgdk_native_find(name);
-  if (func == NULL) {
-    sampgdk_log_warning("Native function not found: %s", name);
-  }
-
-  return func;
-}
-
-static cell AMX_NATIVE_CALL native_stub(AMX *amx, cell *params) {
-  return 0;
-}
-
-AMX_NATIVE sampgdk_native_find_stub(const char *name) {
-  AMX_NATIVE func;
-
-  assert(name != NULL);
-
-  if ((func = sampgdk_native_find(name)) == NULL) {
-    return native_stub;
-  }
-
-  return func;
-}
-
-AMX_NATIVE sampgdk_native_find_warn_stub(const char *name) {
-  AMX_NATIVE func;
-
-  assert(name != NULL);
-
-  if ((func = sampgdk_native_find_warn(name)) == NULL) {
-    return native_stub;
-  }
-
-  return func;
-}
-
-AMX_NATIVE sampgdk_native_find_flexible(const char *name, AMX_NATIVE current) {
-  char *always_search;
-
-  if (SAMPGDK_LIKELY(current != NULL && current != native_stub)) {
-    return current;
-  }
-
-  if (current == NULL) {
-    /* This is the first time this native is searched for, do it as usual.
-     */
-    return sampgdk_native_find_warn_stub(name);
-  }
-
-  if ((always_search = getenv("SAMGDK_NATIVE_SEARCH_ALWAYS")) != NULL
-      && atoi(always_search) != 0) {
-    /* Previous attempt to find the native failed, but the always search
-     * option is set so search again.
-     */
-    return sampgdk_native_find_warn_stub(name);
-  }
-
-  return current;
-}
-
-const AMX_NATIVE_INFO *sampgdk_native_get_natives(int *number) {
-  if (number != NULL) {
-    *number = _sampgdk_natives.count - 1;
-  }
-  return (AMX_NATIVE_INFO *)_sampgdk_natives.data;
-}
-
-cell sampgdk_native_call(AMX_NATIVE native, cell *params) {
-  AMX *amx = sampgdk_fakeamx_amx();
-  assert(native != NULL);
-  return native(amx, params);
-}
-
-cell sampgdk_native_invoke(AMX_NATIVE native,
-                           const char *format,
-                           va_list args) {
-  cell i = 0;
-  const char *format_ptr = format;
-  unsigned char args_copy[_SAMPGDK_NATIVE_MAX_ARGS *
-                          _SAMPGDK_NATIVE_MAX_ARGS_SIZE];
-  unsigned char *args_ptr = args_copy;
-  void *args_array[_SAMPGDK_NATIVE_MAX_ARGS];
-
-  assert(format_ptr != NULL);
-
-  while (*format_ptr != '\0' && i < _SAMPGDK_NATIVE_MAX_ARGS) {
-    switch (*format_ptr) {
-      case 'i': /* integer */
-      case 'd': /* integer */
-        *(int *)args_ptr = va_arg(args, int);
-        args_array[i++] = args_ptr;
-        args_ptr += _SAMPGDK_NATIVE_MAX_ARGS_SIZE;
-        break;
-      case 'b': /* boolean */
-        *(bool *)args_ptr = !!va_arg(args, int);
-        args_array[i++] = args_ptr;
-        args_ptr += _SAMPGDK_NATIVE_MAX_ARGS_SIZE;
-        break;
-      case 'f': /* floating-point */
-        *(float *)args_ptr = (float)va_arg(args, double);
-        args_array[i++] = args_ptr;
-        args_ptr += _SAMPGDK_NATIVE_MAX_ARGS_SIZE;
-        break;
-      case 'r': /* const reference */
-      case 'R': /* non-const reference */
-      case 's': /* const string */
-      case 'S': /* non-const string */
-      case 'a': /* const array */
-      case 'A': /* non-const array */
-        args_array[i++] = va_arg(args, void *);
-        break;
-    }
-    format_ptr++;
-  }
-
-  return sampgdk_native_invoke_array(native, format, args_array);
-}
-
-cell sampgdk_native_invoke_array(AMX_NATIVE native, const char *format,
-                                 void **args) {
-  AMX *amx = sampgdk_fakeamx_amx();
-  const char *format_ptr = format;
-  cell i = 0;
-  cell params[_SAMPGDK_NATIVE_MAX_ARGS + 1];
-  cell size[_SAMPGDK_NATIVE_MAX_ARGS] = {0};
-  char type[_SAMPGDK_NATIVE_MAX_ARGS];
-  int needs_size = -1;
-  enum {
-    ST_READ_SPEC,
-    ST_NEED_SIZE,
-    ST_READING_SIZE,
-    ST_READING_SIZE_ARG,
-    ST_READ_SIZE
-  } state = ST_READ_SPEC;
-  cell retval;
-
-  assert(format_ptr != NULL);
-  assert(args != NULL);
-
-  while (*format_ptr != '\0' && i < _SAMPGDK_NATIVE_MAX_ARGS) {
-    switch (state) {
-      case ST_READ_SPEC:
-        switch (*format_ptr) {
-          case 'i': /* integer */
-          case 'd': /* integer */
-            params[i + 1] = *(int *)args[i];
-            break;
-          case 'b': /* boolean */
-            params[i + 1] = *(bool *)args[i];
-            break;
-          case 'f': /* floating-point */ {
-            float value = *(float *)args[i];
-            params[i + 1] = amx_ftoc(value);
-            break;
-          }
-          case 'r': /* const reference */
-          case 'R': /* non-const reference */ {
-            cell *ptr = (cell *)args[i];
-            sampgdk_fakeamx_push_cell(*ptr, &params[i + 1]);
-            size[i] = sizeof(cell);
-            break;
-          }
-          case 's': /* const string */ {
-            char *str = (char *)args[i];
-            int str_size;
-            sampgdk_fakeamx_push_string(str, &str_size, &params[i + 1]);
-            size[i] = str_size;
-            break;
-          }
-          case 'S': /* non-const string */
-          case 'a': /* const array */
-          case 'A': /* non-const array */
-            needs_size = i;
-            state = ST_NEED_SIZE;
-            break;
-          default:
-            sampgdk_log_warning("Unrecognized type specifier '%c'", *format_ptr);
-        }
-        type[i++] = *format_ptr++;
-        break;
-      case ST_NEED_SIZE:
-        if (*format_ptr == '[') {
-          state = ST_READING_SIZE;
-        } else {
-          sampgdk_log_warning("Bad format string: expected '[' but got '%c'",
-                              *format_ptr);
-        }
-        format_ptr++;
-        break;
-      case ST_READING_SIZE:
-        if (*format_ptr == '*') {
-          format_ptr++;
-          state = ST_READING_SIZE_ARG;
-        } else {
-          size[needs_size] = (int)strtol(format_ptr, (char **)&format_ptr, 10);
-          state = ST_READ_SIZE;
-        }
-        break;
-      case ST_READING_SIZE_ARG: {
-        int index = (int)strtol(format_ptr, (char **)&format_ptr, 10);
-        size[needs_size] = *(int *)args[index];
-        state = ST_READ_SIZE;
-        break;
-      }
-      case ST_READ_SIZE: {
-        if (*format_ptr == ']') {
-          switch (type[needs_size]) {
-            case 'a':
-            case 'A':
-            case 'S':
-              if (size[needs_size] > 0) {
-                sampgdk_fakeamx_push_array((const cell *)args[needs_size], size[needs_size],
-                                           &params[needs_size + 1]);
-              } else {
-                sampgdk_log_warning("Invalid buffer size");
-              }
-              break;
-          }
-          needs_size = -1;
-          state = ST_READ_SPEC;
-        } else {
-          sampgdk_log_warning("Bad format string (expected ']' but got '%c')",
-                              *format_ptr);
-        }
-        format_ptr++;
-        break;
-      }
-    }
-  }
-
-  if (*format_ptr != '\0') {
-    sampgdk_log_warning("Too many native arguments (at most %d allowed)",
-                        _SAMPGDK_NATIVE_MAX_ARGS);
-  }
-
-  params[0] = i * sizeof(cell);
-  assert(native != NULL);
-  retval = native(amx, params);
-
-  while (--i >= 0) {
-    if (size[i] > 0) {
-      /* If this is an output parameter we have to write the updated value
-       * back to the argument.
-       */
-      switch (type[i]) {
-        case 'R':
-          sampgdk_fakeamx_get_cell(params[i + 1], (cell *)args[i]);
-          break;
-        case 'S':
-          sampgdk_fakeamx_get_string(params[i + 1], (char *)args[i], size[i]);
-          break;
-        case 'A':
-          sampgdk_fakeamx_get_array(params[i + 1], (cell *)args[i], size[i]);
-          break;
-      }
-      sampgdk_fakeamx_pop(params[i + 1]);
-    }
-  }
-
-  return retval;
-}
-
-#include <assert.h>
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
-
-/* #include "array.h" */
-/* #include "callback.h" */
-/* #include "init.h" */
-/* #include "log.h" */
-/* #include "param.h" */
-/* #include "plugin.h" */
-
-#define _SAMPGDK_CALLBACK_MAX_ARGS 32
-
-typedef bool (PLUGIN_CALL *_sampgdk_callback_filter)(
-    AMX *amx,
-    const char *name,
-    cell *params,
-    cell *retval);
-typedef bool (PLUGIN_CALL *_sampgdk_callback_filter2)(
-    AMX *amx,
-    const char *name,
-    cell *params,
-    cell *retval,
-    bool *stop);
-
-struct _sampgdk_callback_info {
-  char *name;
-  char *func_name;
-  void *handler;
-};
-
-static struct sampgdk_array _sampgdk_callbacks;
-
-static int _sampgdk_callback_compare_name(const void *key,
-                                          const void *elem) {
-  assert(key != NULL);
-  assert(elem != NULL);
-  return strcmp((const char *)key,
-                ((const struct _sampgdk_callback_info *)elem)->name);
-}
-
-static struct _sampgdk_callback_info *_sampgdk_callback_find(const char *name) {
-  assert(name != NULL);
-
-  if (_sampgdk_callbacks.count <= 0) {
-    return NULL;
-  }
-
-  return (struct _sampgdk_callback_info *)bsearch(name,
-                 _sampgdk_callbacks.data,
-                 _sampgdk_callbacks.count,
-                 _sampgdk_callbacks.elem_size,
-                 _sampgdk_callback_compare_name);
-}
-
-SAMPGDK_MODULE_INIT(callback) {
-  int error;
-
-  error = sampgdk_array_new(&_sampgdk_callbacks,
-                            1,
-                            sizeof(struct _sampgdk_callback_info));
-  if (error < 0) {
-    return error;
-  }
-
-  error = sampgdk_callback_register(":OnPublicCall", NULL);
-  if (error < 0) {
-    return error;
-  }
-
-  error = sampgdk_callback_register(":OnPublicCall2", NULL);
-  if (error < 0) {
-    return error;
-  }
-
-  return 0;
-}
-
-SAMPGDK_MODULE_CLEANUP(callback) {
-  int i;
-  struct _sampgdk_callback_info *callback;
-
-  for (i = 0; i < _sampgdk_callbacks.count; i++) {
-    callback = (struct _sampgdk_callback_info *)sampgdk_array_get(&_sampgdk_callbacks, i);
-    free(callback->name);
-  }
-
-  sampgdk_array_free(&_sampgdk_callbacks);
-}
-
-int sampgdk_callback_register(const char *name,
-                              sampgdk_callback handler) {
-  int error;
-  int count;
-  int i;
-  struct _sampgdk_callback_info callback;
-  struct _sampgdk_callback_info *ptr;
-
-  assert(name != NULL);
-
-  ptr = _sampgdk_callback_find(name);
-  if (ptr != NULL) {
-    return sampgdk_array_get_index(&_sampgdk_callbacks, ptr);
-  }
-
-  callback.handler = (void *)handler;
-
-  callback.name = (char *)malloc(strlen(name) + 1);
-  if (callback.name == NULL) {
-    return -ENOMEM;
-  }
-
-  strcpy(callback.name, name);
-
-  if (callback.name[0] == ':') {
-    /* Special callbacks have a name that begins with ':'. This is to ensure
-     * that their name is not used by SA-MP or user scripts.
-     */
-    callback.func_name = callback.name + 1;
-  } else {
-    callback.func_name = callback.name;
-  }
-
-  /* Keep callbacks ordered by name.
-   * This allows us to use binary search when searching through callbacks.
-   */
-  count = _sampgdk_callbacks.count;
-  for (i = 0; i < count; i++) {
-    ptr = (struct _sampgdk_callback_info *)sampgdk_array_get(
-        &_sampgdk_callbacks, i);
-    if (strcmp(name, ptr->name) <= 0) {
-      break;
-    }
-  }
-
-  error = sampgdk_array_insert(&_sampgdk_callbacks, i, 1, &callback);
-  if (error < 0) {
-    free(callback.name);
-    return error;
-  }
-
-  return error; /* index */
-}
-
-void sampgdk_callback_unregister(const char *name) {
-  struct _sampgdk_callback_info *callback;
-
-  if ((callback = _sampgdk_callback_find(name)) != NULL) {
-    callback->handler = NULL;
-  }
-}
-
-bool sampgdk_callback_get(int index, char **name) {
-  struct _sampgdk_callback_info *callback;
-
-  assert(name != NULL);
-
-  if (index < 0 || index >= _sampgdk_callbacks.count) {
-    return false;
-  }
-
-  callback = (struct _sampgdk_callback_info *)sampgdk_array_get(
-      &_sampgdk_callbacks, index);
-  *name = callback->name;
-
-  return true;
-}
-
-bool sampgdk_callback_invoke(AMX *amx,
-                             const char *name,
-                             int paramcount,
-                             cell *retval)
-{
-  struct _sampgdk_callback_info *callback;
-  struct _sampgdk_callback_info *callback_filter;
-  struct _sampgdk_callback_info *callback_filter2;
-  cell params[_SAMPGDK_CALLBACK_MAX_ARGS + 1];
-  void **plugins;
-  int num_plugins;
-  int i;
-
-  assert(amx != NULL);
-
-  callback = _sampgdk_callback_find(name);
-  callback_filter = _sampgdk_callback_find(":OnPublicCall");
-  callback_filter2 = _sampgdk_callback_find(":OnPublicCall2");
-
-  assert(callback_filter != NULL);
-  assert(callback_filter2 != NULL);
-
-  if (paramcount > _SAMPGDK_CALLBACK_MAX_ARGS) {
-    sampgdk_log_error("Too many callback arguments (at most %d allowed)",
-                      _SAMPGDK_CALLBACK_MAX_ARGS);
-    return true;
-  }
-
-  params[0] = paramcount * sizeof(cell);
-  memcpy(&params[1], sampgdk_param_get_start(amx), params[0]);
-
-  plugins = sampgdk_plugin_get_plugins(&num_plugins);
-
-  for (i = 0; i < num_plugins; i++) {
-    void *plugin = plugins[i];
-    void *func;
-    bool do_call = true;
-    bool stop = false;
-
-    func = sampgdk_plugin_get_symbol(plugin, callback_filter->func_name);
-    if (func != NULL) {
-      do_call = ((_sampgdk_callback_filter)func)(amx, name, params, retval);
-    }
-
-    /* callback_filter2 is similar to callback_filter except it can stop
-     * propagation of public call to other plugins. It was added for backwards
-     * compatibility.
-     *
-     * callback_filter2's return value overrides that of callback_filter.
-     */
-    func = sampgdk_plugin_get_symbol(plugin, callback_filter2->func_name);
-    if (func != NULL) {
-      do_call = !((_sampgdk_callback_filter2)func)(amx,
-                                                   name,
-                                                   params,
-                                                   retval,
-                                                   &stop);
-    }
-
-    if (stop) {
-      return false;
-    }
-    if (!do_call || callback == NULL || callback->handler == NULL) {
-      continue;
-    }
-
-    func = sampgdk_plugin_get_symbol(plugin, callback->func_name);
-    if (func != NULL
-        && !((sampgdk_callback)callback->handler)(amx, func, retval)) {
-      return false;
-    }
-  }
-
-  return true;
-}
 
 #include <assert.h>
 #include <limits.h>
@@ -1986,8 +1626,13 @@ SAMPGDK_MODULE_INIT(fakeamx) {
   _sampgdk_fakeamx.amxhdr.magic = AMX_MAGIC;
   _sampgdk_fakeamx.amxhdr.file_version = MIN_FILE_VERSION;
   _sampgdk_fakeamx.amxhdr.amx_version = MIN_AMX_VERSION;
-  _sampgdk_fakeamx.amxhdr.dat =
-    (cell)_sampgdk_fakeamx.heap.data - (cell)&_sampgdk_fakeamx.amxhdr;
+  /* dat is unused for fake AMX; amx->data is set directly below.
+   * char* subtraction yields ptrdiff_t (64-bit on x64, 32-bit on x86).
+   * Cast to int32_t truncates explicitly; safe because field is unused.
+   */
+  _sampgdk_fakeamx.amxhdr.dat = (int32_t)(
+      (char *)_sampgdk_fakeamx.heap.data
+    - (char *)&_sampgdk_fakeamx.amxhdr);
   _sampgdk_fakeamx.amxhdr.defsize = sizeof(AMX_FUNCSTUBNT);
 
   _sampgdk_fakeamx.amx.base = (unsigned char *)&_sampgdk_fakeamx.amxhdr;
@@ -2029,8 +1674,12 @@ int sampgdk_fakeamx_resize_heap(int cells) {
     return error;
   }
 
-  /* Update data pointers to point at the newly allocated heap. */
-  _sampgdk_fakeamx.amxhdr.dat = (cell)_sampgdk_fakeamx.heap.data - (cell)&_sampgdk_fakeamx.amxhdr;
+  /* Update data pointers to point at the newly allocated heap.
+   * dat is unused; amx->data is used instead.
+   */
+  _sampgdk_fakeamx.amxhdr.dat = (int32_t)(
+      (char *)_sampgdk_fakeamx.heap.data
+    - (char *)&_sampgdk_fakeamx.amxhdr);
   _sampgdk_fakeamx.amx.data = (unsigned char *)_sampgdk_fakeamx.heap.data;
 
   old_stk = _sampgdk_fakeamx.amx.stk;
@@ -2196,6 +1845,660 @@ void sampgdk_fakeamx_pop(cell address) {
 }
 
 #include <assert.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* #include "array.h" */
+/* #include "fakeamx.h" */
+/* #include "init.h" */
+/* #include "likely.h" */
+/* #include "native.h" */
+/* #include "log.h" */
+
+#define _SAMPGDK_NATIVE_MAX_ARGS     32
+#define _SAMPGDK_NATIVE_MAX_ARGS_SIZE 8  /* in bytes */
+
+static struct sampgdk_array _sampgdk_natives;
+
+SAMPGDK_MODULE_INIT(native) {
+  int error;
+  AMX_NATIVE_INFO null = {NULL, NULL};
+
+  error = sampgdk_array_new(&_sampgdk_natives,
+                            128,
+                            sizeof(AMX_NATIVE_INFO));
+  if (error < 0) {
+    return error;
+  }
+
+  return sampgdk_array_append(&_sampgdk_natives, &null);
+}
+
+SAMPGDK_MODULE_CLEANUP(native) {
+  sampgdk_array_free(&_sampgdk_natives);
+}
+
+int sampgdk_native_register(const char *name, AMX_NATIVE func) {
+  AMX_NATIVE old_func;
+  AMX_NATIVE_INFO info;
+  AMX_NATIVE_INFO *ptr;
+  int i;
+
+  info.name = name;
+  info.func = func;
+
+  assert(name != 0);
+
+  old_func = sampgdk_native_find(name);
+  if (old_func != NULL) {
+    return -1;
+  }
+
+  /* Keep natives ordered by name.
+   * This allows us to use binary search in sampgdk_native_find().
+   */
+  for (i = 0; i < _sampgdk_natives.count - 1; i++) {
+    ptr = (AMX_NATIVE_INFO *)sampgdk_array_get(&_sampgdk_natives, i);
+    if (strcmp(name, ptr->name) <= 0) {
+      break;
+    }
+  }
+
+  return sampgdk_array_insert(&_sampgdk_natives, i, 1, &info);
+}
+
+static int _sampgdk_native_compare_bsearch(const void *key,
+                                           const void *elem) {
+  assert(key != NULL);
+  assert(elem != NULL);
+  return strcmp((const char *)key, ((const AMX_NATIVE_INFO *)elem)->name);
+}
+
+AMX_NATIVE sampgdk_native_find(const char *name) {
+  AMX_NATIVE_INFO *info;
+
+  assert(name != NULL);
+
+  if (_sampgdk_natives.data == NULL) {
+    /* Perhaps they forgot to initialize? */
+    return NULL;
+  }
+
+  info = (AMX_NATIVE_INFO *)bsearch(name,
+                                    _sampgdk_natives.data,
+                                    _sampgdk_natives.count - 1,
+                                    _sampgdk_natives.elem_size,
+                                    _sampgdk_native_compare_bsearch);
+  if (info == NULL) {
+    return NULL;
+  }
+
+  return info->func;
+}
+
+AMX_NATIVE sampgdk_native_find_warn(const char *name) {
+  AMX_NATIVE func;
+
+  assert(name != NULL);
+
+  func = sampgdk_native_find(name);
+  if (func == NULL) {
+    sampgdk_log_warning("Native function not found: %s", name);
+  }
+
+  return func;
+}
+
+static cell AMX_NATIVE_CALL native_stub(AMX *amx, cell *params) {
+  return 0;
+}
+
+AMX_NATIVE sampgdk_native_find_stub(const char *name) {
+  AMX_NATIVE func;
+
+  assert(name != NULL);
+
+  if ((func = sampgdk_native_find(name)) == NULL) {
+    return native_stub;
+  }
+
+  return func;
+}
+
+AMX_NATIVE sampgdk_native_find_warn_stub(const char *name) {
+  AMX_NATIVE func;
+
+  assert(name != NULL);
+
+  if ((func = sampgdk_native_find_warn(name)) == NULL) {
+    return native_stub;
+  }
+
+  return func;
+}
+
+AMX_NATIVE sampgdk_native_find_flexible(const char *name, AMX_NATIVE current) {
+  char *always_search;
+
+  if (SAMPGDK_LIKELY(current != NULL && current != native_stub)) {
+    return current;
+  }
+
+  if (current == NULL) {
+    /* This is the first time this native is searched for, do it as usual.
+     */
+    return sampgdk_native_find_warn_stub(name);
+  }
+
+  /* current == native_stub */
+  if ((always_search = getenv("SAMGDK_NATIVE_SEARCH_ALWAYS")) != NULL
+      && atoi(always_search) != 0) {
+    /* Previous attempt to find the native failed, but the always search
+     * option is set so search again.
+     */
+    return sampgdk_native_find_warn_stub(name);
+  }
+
+  return current;
+}
+
+const AMX_NATIVE_INFO *sampgdk_native_get_natives(int *number) {
+  if (number != NULL) {
+    *number = _sampgdk_natives.count - 1;
+  }
+  return (AMX_NATIVE_INFO *)_sampgdk_natives.data;
+}
+
+cell sampgdk_native_call(AMX_NATIVE native, cell *params) {
+  AMX *amx = sampgdk_fakeamx_amx();
+  assert(native != NULL);
+  return native(amx, params);
+}
+
+cell sampgdk_native_invoke(AMX_NATIVE native,
+                           const char *format,
+                           va_list args) {
+  cell i = 0;
+  const char *format_ptr = format;
+  unsigned char args_copy[_SAMPGDK_NATIVE_MAX_ARGS *
+                          _SAMPGDK_NATIVE_MAX_ARGS_SIZE];
+  unsigned char *args_ptr = args_copy;
+  void *args_array[_SAMPGDK_NATIVE_MAX_ARGS];
+
+  assert(format_ptr != NULL);
+
+  while (*format_ptr != '\0' && i < _SAMPGDK_NATIVE_MAX_ARGS) {
+    switch (*format_ptr) {
+      case 'i': /* integer */
+      case 'd': /* integer */
+        *(int *)args_ptr = va_arg(args, int);
+        args_array[i++] = args_ptr;
+        args_ptr += _SAMPGDK_NATIVE_MAX_ARGS_SIZE;
+        break;
+      case 'b': /* boolean */
+        *(bool *)args_ptr = !!va_arg(args, int);
+        args_array[i++] = args_ptr;
+        args_ptr += _SAMPGDK_NATIVE_MAX_ARGS_SIZE;
+        break;
+      case 'f': /* floating-point */
+        *(float *)args_ptr = (float)va_arg(args, double);
+        args_array[i++] = args_ptr;
+        args_ptr += _SAMPGDK_NATIVE_MAX_ARGS_SIZE;
+        break;
+      case 'r': /* const reference */
+      case 'R': /* non-const reference */
+      case 's': /* const string */
+      case 'S': /* non-const string */
+      case 'a': /* const array */
+      case 'A': /* non-const array */
+        args_array[i++] = va_arg(args, void *);
+        break;
+    }
+    format_ptr++;
+  }
+
+  return sampgdk_native_invoke_array(native, format, args_array);
+}
+
+cell sampgdk_native_invoke_array(AMX_NATIVE native, const char *format,
+                                 void **args) {
+  AMX *amx = sampgdk_fakeamx_amx();
+  const char *format_ptr = format;
+  cell i = 0;
+  cell params[_SAMPGDK_NATIVE_MAX_ARGS + 1];
+  cell size[_SAMPGDK_NATIVE_MAX_ARGS] = {0};
+  char type[_SAMPGDK_NATIVE_MAX_ARGS];
+  int needs_size = -1;
+  enum {
+    ST_READ_SPEC,
+    ST_NEED_SIZE,
+    ST_READING_SIZE,
+    ST_READING_SIZE_ARG,
+    ST_READ_SIZE
+  } state = ST_READ_SPEC;
+  cell retval;
+
+  assert(format_ptr != NULL);
+  assert(args != NULL);
+
+  while (*format_ptr != '\0' && i < _SAMPGDK_NATIVE_MAX_ARGS) {
+    switch (state) {
+      case ST_READ_SPEC:
+        switch (*format_ptr) {
+          case 'i': /* integer */
+          case 'd': /* integer */
+            params[i + 1] = *(int *)args[i];
+            break;
+          case 'b': /* boolean */
+            params[i + 1] = *(bool *)args[i];
+            break;
+          case 'f': /* floating-point */ {
+            float value = *(float *)args[i];
+            params[i + 1] = amx_ftoc(value);
+            break;
+          }
+          case 'r': /* const reference */
+          case 'R': /* non-const reference */ {
+            cell *ptr = (cell *)args[i];
+            sampgdk_fakeamx_push_cell(*ptr, &params[i + 1]);
+            size[i] = sizeof(cell);
+            break;
+          }
+          case 's': /* const string */ {
+            char *str = (char *)args[i];
+            int str_size;
+            sampgdk_fakeamx_push_string(str, &str_size, &params[i + 1]);
+            size[i] = str_size;
+            break;
+          }
+          case 'S': /* non-const string */
+          case 'a': /* const array */
+          case 'A': /* non-const array */
+            needs_size = i;
+            state = ST_NEED_SIZE;
+            break;
+          default:
+            sampgdk_log_warning("Unrecognized type specifier '%c'",
+                                *format_ptr);
+        }
+        type[i++] = *format_ptr++;
+        break;
+      case ST_NEED_SIZE:
+        if (*format_ptr == '[') {
+          state = ST_READING_SIZE;
+        } else {
+          sampgdk_log_warning("Bad format string: expected '[' but got '%c'",
+                              *format_ptr);
+        }
+        format_ptr++;
+        break;
+      case ST_READING_SIZE:
+        if (*format_ptr == '*') {
+          format_ptr++;
+          state = ST_READING_SIZE_ARG;
+        } else {
+          size[needs_size] = (int)strtol(format_ptr, (char **)&format_ptr, 10);
+          state = ST_READ_SIZE;
+        }
+        break;
+      case ST_READING_SIZE_ARG: {
+        int index = (int)strtol(format_ptr, (char **)&format_ptr, 10);
+        size[needs_size] = *(int *)args[index];
+        state = ST_READ_SIZE;
+        break;
+      }
+      case ST_READ_SIZE: {
+        if (*format_ptr == ']') {
+          switch (type[needs_size]) {
+            case 'a':
+            case 'A':
+            case 'S':
+              if (size[needs_size] > 0) {
+                sampgdk_fakeamx_push_array((const cell *)args[needs_size],
+                                           size[needs_size],
+                                           &params[needs_size + 1]);
+              } else {
+                sampgdk_log_warning("Invalid buffer size");
+              }
+              break;
+          }
+          needs_size = -1;
+          state = ST_READ_SPEC;
+        } else {
+          sampgdk_log_warning("Bad format string (expected ']' but got '%c')",
+                              *format_ptr);
+        }
+        format_ptr++;
+        break;
+      }
+    }
+  }
+
+  if (*format_ptr != '\0') {
+    sampgdk_log_warning("Too many native arguments (at most %d allowed)",
+                        _SAMPGDK_NATIVE_MAX_ARGS);
+  }
+
+  params[0] = i * sizeof(cell);
+  assert(native != NULL);
+  retval = native(amx, params);
+
+  while (--i >= 0) {
+    if (size[i] > 0) {
+      /* If this is an output parameter we have to write the updated value
+       * back to the argument.
+       */
+      switch (type[i]) {
+        case 'R':
+          sampgdk_fakeamx_get_cell(params[i + 1], (cell *)args[i]);
+          break;
+        case 'S':
+          sampgdk_fakeamx_get_string(params[i + 1], (char *)args[i], size[i]);
+          break;
+        case 'A':
+          sampgdk_fakeamx_get_array(params[i + 1], (cell *)args[i], size[i]);
+          break;
+      }
+      sampgdk_fakeamx_pop(params[i + 1]);
+    }
+  }
+
+  return retval;
+}
+
+#include "sampgdk.h"
+
+/* #include "internal/native.h" */
+
+SAMPGDK_API(const AMX_NATIVE_INFO *, sampgdk_GetNatives(int *number)) {
+  return sampgdk_native_get_natives(number);
+}
+
+SAMPGDK_API(AMX_NATIVE, sampgdk_FindNative(const char *name)) {
+  if (name != NULL) {
+    return sampgdk_native_find(name);
+  }
+  return NULL;
+}
+
+SAMPGDK_API(cell, sampgdk_CallNative(AMX_NATIVE native, cell *params)) {
+  return sampgdk_native_call(native, params);
+}
+
+SAMPGDK_API(cell, sampgdk_InvokeNative(AMX_NATIVE native,
+                                       const char *format, ...)) {
+  cell retval;
+  va_list args;
+
+  va_start(args, format);
+  retval = sampgdk_native_invoke(native, format, args);
+  va_end(args);
+
+  return retval;
+}
+
+SAMPGDK_API(cell, sampgdk_InvokeNativeV(AMX_NATIVE native,
+                                        const char *format, va_list args)) {
+  return sampgdk_native_invoke(native, format, args);
+}
+
+SAMPGDK_API(cell, sampgdk_InvokeNativeArray(AMX_NATIVE native,
+                                            const char *format, void **args)) {
+  return sampgdk_native_invoke_array(native, format, args);
+}
+
+#include <assert.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* #include "array.h" */
+/* #include "callback.h" */
+/* #include "init.h" */
+/* #include "log.h" */
+/* #include "param.h" */
+/* #include "plugin.h" */
+
+#define _SAMPGDK_CALLBACK_MAX_ARGS 32
+
+typedef bool (PLUGIN_CALL *_sampgdk_callback_filter)(
+    AMX *amx,
+    const char *name,
+    cell *params,
+    cell *retval);
+typedef bool (PLUGIN_CALL *_sampgdk_callback_filter2)(
+    AMX *amx,
+    const char *name,
+    cell *params,
+    cell *retval,
+    bool *stop);
+
+struct _sampgdk_callback_info {
+  char *name;
+  char *func_name;
+  void *handler;
+};
+
+static struct sampgdk_array _sampgdk_callbacks;
+
+static int _sampgdk_callback_compare_name(const void *key,
+                                          const void *elem) {
+  assert(key != NULL);
+  assert(elem != NULL);
+  return strcmp((const char *)key,
+                ((const struct _sampgdk_callback_info *)elem)->name);
+}
+
+static struct _sampgdk_callback_info *_sampgdk_callback_find(const char *name) {
+  assert(name != NULL);
+
+  if (_sampgdk_callbacks.count <= 0) {
+    return NULL;
+  }
+
+  return (struct _sampgdk_callback_info *)bsearch(name,
+                 _sampgdk_callbacks.data,
+                 _sampgdk_callbacks.count,
+                 _sampgdk_callbacks.elem_size,
+                 _sampgdk_callback_compare_name);
+}
+
+SAMPGDK_MODULE_INIT(callback) {
+  int error;
+
+  error = sampgdk_array_new(&_sampgdk_callbacks,
+                            32,
+                            sizeof(struct _sampgdk_callback_info));
+  if (error < 0) {
+    return error;
+  }
+
+  error = sampgdk_callback_register(":OnPublicCall", NULL);
+  if (error < 0) {
+    return error;
+  }
+
+  error = sampgdk_callback_register(":OnPublicCall2", NULL);
+  if (error < 0) {
+    return error;
+  }
+
+  return 0;
+}
+
+SAMPGDK_MODULE_CLEANUP(callback) {
+  int i;
+  struct _sampgdk_callback_info *callback;
+
+  for (i = 0; i < _sampgdk_callbacks.count; i++) {
+    callback = (struct _sampgdk_callback_info *)sampgdk_array_get(&_sampgdk_callbacks, i);
+    free(callback->name);
+  }
+
+  sampgdk_array_free(&_sampgdk_callbacks);
+}
+
+int sampgdk_callback_register(const char *name,
+                              sampgdk_callback handler) {
+  int error;
+  int count;
+  int i;
+  struct _sampgdk_callback_info callback;
+  struct _sampgdk_callback_info *ptr;
+
+  assert(name != NULL);
+
+  ptr = _sampgdk_callback_find(name);
+  if (ptr != NULL) {
+    return sampgdk_array_get_index(&_sampgdk_callbacks, ptr);
+  }
+
+  callback.handler = (void *)handler;
+
+  callback.name = (char *)malloc(strlen(name) + 1);
+  if (callback.name == NULL) {
+    return -ENOMEM;
+  }
+
+  strcpy(callback.name, name);
+
+  if (callback.name[0] == ':') {
+    /* Special callbacks have a name that begins with ':'. This is to ensure
+     * that their name is not used by SA-MP or user scripts.
+     */
+    callback.func_name = callback.name + 1;
+  } else {
+    callback.func_name = callback.name;
+  }
+
+  /* Keep callbacks ordered by name.
+   * This allows us to use binary search when searching through callbacks.
+   */
+  count = _sampgdk_callbacks.count;
+  for (i = 0; i < count; i++) {
+    ptr = (struct _sampgdk_callback_info *)sampgdk_array_get(
+        &_sampgdk_callbacks, i);
+    if (strcmp(name, ptr->name) <= 0) {
+      break;
+    }
+  }
+
+  error = sampgdk_array_insert(&_sampgdk_callbacks, i, 1, &callback);
+  if (error < 0) {
+    free(callback.name);
+    return error;
+  }
+
+  return error; /* index */
+}
+
+void sampgdk_callback_unregister(const char *name) {
+  struct _sampgdk_callback_info *callback;
+
+  if ((callback = _sampgdk_callback_find(name)) != NULL) {
+    callback->handler = NULL;
+  }
+}
+
+bool sampgdk_callback_get(int index, char **name) {
+  struct _sampgdk_callback_info *callback;
+
+  assert(name != NULL);
+
+  if (index < 0 || index >= _sampgdk_callbacks.count) {
+    return false;
+  }
+
+  callback = (struct _sampgdk_callback_info *)sampgdk_array_get(
+      &_sampgdk_callbacks, index);
+  *name = callback->name;
+
+  return true;
+}
+
+bool sampgdk_callback_invoke(AMX *amx,
+                             const char *name,
+                             int paramcount,
+                             cell *retval)
+{
+  cell params[_SAMPGDK_CALLBACK_MAX_ARGS + 1];
+  void **plugins;
+  int num_plugins;
+  int i;
+
+  assert(amx != NULL);
+
+  if (paramcount > _SAMPGDK_CALLBACK_MAX_ARGS) {
+    sampgdk_log_error("Too many callback arguments (at most %d allowed)",
+                      _SAMPGDK_CALLBACK_MAX_ARGS);
+    return true;
+  }
+
+  params[0] = paramcount * sizeof(cell);
+  memcpy(&params[1], sampgdk_param_get_start(amx), params[0]);
+
+  plugins = sampgdk_plugin_get_plugins(&num_plugins);
+
+  for (i = 0; i < num_plugins; i++) {
+    void *plugin = plugins[i];
+    struct _sampgdk_callback_info *callback;
+    struct _sampgdk_callback_info *callback_filter;
+    struct _sampgdk_callback_info *callback_filter2;
+    void *func;
+    bool do_call = true;
+    bool stop = false;
+
+    callback_filter = _sampgdk_callback_find(":OnPublicCall");
+    assert(callback_filter != NULL);
+    
+    func = sampgdk_plugin_get_symbol(plugin, callback_filter->func_name);
+    if (func != NULL) {
+      do_call = ((_sampgdk_callback_filter)func)(amx, name, params, retval);
+    }
+
+    /* callback_filter2 is similar to callback_filter except it can stop
+     * propagation of public call to other plugins. It was added for backwards
+     * compatibility.
+     *
+     * callback_filter2's return value overrides that of callback_filter.
+     */
+    callback_filter2 = _sampgdk_callback_find(":OnPublicCall2");
+    assert(callback_filter2 != NULL);
+    
+    func = sampgdk_plugin_get_symbol(plugin, callback_filter2->func_name);
+    if (func != NULL) {
+      do_call = !((_sampgdk_callback_filter2)func)(amx,
+                                                   name,
+                                                   params,
+                                                   retval,
+                                                   &stop);
+    }
+
+    if (stop) {
+      return false;
+    }
+
+    if (!do_call) {
+      continue;
+    }
+
+    callback = _sampgdk_callback_find(name);
+    if (callback == NULL || callback->handler == NULL) {
+      continue;
+    }
+    
+    func = sampgdk_plugin_get_symbol(plugin, callback->func_name);
+    if (func != NULL
+        && !((sampgdk_callback)callback->handler)(amx, func, retval)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+#include <assert.h>
 #include <stdlib.h>
 
 /* #include "amx.h" */
@@ -2245,353 +2548,6 @@ cell *sampgdk_param_get_start(AMX *amx) {
     ? amx->data
     : amx->base + ((AMX_HEADER *)amx->base)->dat;
   return (cell *)(data + amx->stk);
-}
-
-/* #include "amx.h" */
-
-struct sampgdk_amx_api *sampgdk_amx_api;
-
-#include <assert.h>
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-
-#include "sampgdk.h"
-
-#if SAMPGDK_WINDOWS
-  #include <windows.h>
-#endif
-
-/* #include "array.h" */
-/* #include "init.h" */
-/* #include "log.h" */
-/* #include "plugin.h" */
-/* #include "timer.h" */
-/* #include "types.h" */
-
-struct _sampgdk_timer_info {
-  bool    is_set;
-  void   *plugin;
-  int64_t started;
-  int     interval;
-  void   *callback;
-  void   *param;
-  bool    repeat;
-};
-
-static struct sampgdk_array _sampgdk_timers;
-
-#if SAMPGDK_WINDOWS
-
-static int64_t _sampgdk_timer_now(void) {
-  LARGE_INTEGER freq;
-  LARGE_INTEGER counter;
-
-  if (QueryPerformanceFrequency(&freq) == 0) {
-    sampgdk_log_error("QueryPerformanceFrequency: error %d", GetLastError());
-    return 0;
-  }
-  if (QueryPerformanceCounter(&counter) == 0) {
-    sampgdk_log_error("QueryPerformanceCounter: error %d", GetLastError());
-    return 0;
-  }
-
-  return (int64_t)(1000.0L / freq.QuadPart * counter.QuadPart);
-}
-
-#else /* SAMPGDK_WINDOWS */
-
-static int64_t _sampgdk_timer_now(void) {
-  struct timespec ts;
-  int64_t msec;
-  int64_t msec_fract;
-
-  if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
-    sampgdk_log_error("clock_gettime: %s", strerror(errno));
-    return 0;
-  }
-
-  msec = (int64_t)ts.tv_sec * 1000;
-  msec_fract = (int64_t)ts.tv_nsec / 1000000L;
-
-  return msec + msec_fract;
-}
-
-#endif /* !SAMPGDK_WINDOWS */
-
-static int _sampgdk_timer_find_slot(void) {
-  int i;
-
-  for (i = 0; i < _sampgdk_timers.count; i++) {
-    struct _sampgdk_timer_info *timer;
-
-    timer = (struct _sampgdk_timer_info *)sampgdk_array_get(&_sampgdk_timers, i);
-    if (!timer->is_set) {
-      return i;
-    }
-  }
-
-  return -1;
-}
-
-static void _sampgdk_timer_fire(int timerid, int64_t elapsed) {
-  struct _sampgdk_timer_info *timer;
-  int64_t now = _sampgdk_timer_now();
-  int64_t started;
-
-  assert(timerid > 0 && timerid <= _sampgdk_timers.count);
-  timer = (struct _sampgdk_timer_info *)sampgdk_array_get(&_sampgdk_timers, timerid - 1);
-
-  assert(timer->is_set);
-  started = timer->started;
-
-  sampgdk_log_debug("Firing timer %d, now = %" PRId64 ", elapsed = %" PRId64,
-      timerid, now, elapsed);
-  ((sampgdk_timer_callback)timer->callback)(timerid, timer->param);
-
-  /* We don't want to kill the same timer twice, so make sure it's not
-   * been killed inside the timer callback.
-   */
-  if (timer->is_set && timer->started == started) {
-    if (timer->repeat) {
-      timer->started = now - (elapsed - timer->interval);
-    } else {
-      sampgdk_timer_kill(timerid);
-    }
-  }
-}
-
-SAMPGDK_MODULE_INIT(timer) {
-  int error;
-
-  error = sampgdk_array_new(&_sampgdk_timers,
-                            10,
-                            sizeof(struct _sampgdk_timer_info));
-  if (error < 0) {
-    return error;
-  }
-
-  sampgdk_array_zero(&_sampgdk_timers);
-
-  return 0;
-}
-
-SAMPGDK_MODULE_CLEANUP(timer) {
-  sampgdk_array_free(&_sampgdk_timers);
-}
-
-int sampgdk_timer_set(int interval,
-                      bool repeat,
-                      sampgdk_timer_callback callback,
-                      void *param) {
-  struct _sampgdk_timer_info timer;
-  int slot;
-  int error;
-  int timerid;
-
-  assert(callback != NULL);
-
-  timer.is_set   = true;
-  timer.interval = interval;
-  timer.repeat   = repeat;
-  timer.callback = (void *)callback;
-  timer.param    = param;
-  timer.started  = _sampgdk_timer_now();
-  timer.plugin   = sampgdk_plugin_get_handle((void *)callback);
-
-  if (timer.started == 0) {
-    return 0; /* error already logged */
-  }
-
-  slot = _sampgdk_timer_find_slot();
-  if (slot >= 0) {
-    sampgdk_array_set(&_sampgdk_timers, slot, &timer);
-  } else {
-    error = sampgdk_array_append(&_sampgdk_timers, &timer);
-    if (error < 0) {
-      sampgdk_log_error("Error setting timer: %s", strerror(-error));
-      return 0;
-    }
-    slot = _sampgdk_timers.count - 1;
-  }
-
-  /* Timer IDs returned by the SA:MP's SetTimer() API begin
-   * with 1, and so do they here.
-   */
-  timerid = slot + 1;
-
-  sampgdk_log_debug("Created timer: ID = %d, interval = %d, repeat = %s",
-      timerid, interval, repeat ? "true" : "false");
-
-  return timerid;
-}
-
-int sampgdk_timer_kill(int timerid) {
-  struct _sampgdk_timer_info *timer;
-
-  if (timerid <= 0 || timerid > _sampgdk_timers.count) {
-    return -EINVAL;
-  }
-
-  timer = (struct _sampgdk_timer_info *)sampgdk_array_get(&_sampgdk_timers, timerid - 1);
-  if (!timer->is_set) {
-    return -EINVAL;
-  }
-
-  timer->is_set = false;
-
-  sampgdk_log_debug("Killed timer %d", timerid);
-
-  return 0;
-}
-
-void sampgdk_timer_process_timers(void *plugin) {
-  int64_t now;
-  int64_t elapsed;
-  int i;
-  struct _sampgdk_timer_info *timer;
-
-  assert(plugin != NULL);
-
-  now = _sampgdk_timer_now();
-
-  for (i = 0; i < _sampgdk_timers.count; i++) {
-    timer = (struct _sampgdk_timer_info *)sampgdk_array_get(&_sampgdk_timers, i);
-
-    if (!timer->is_set
-        || (plugin != NULL && timer->plugin != plugin)) {
-      continue;
-    }
-
-    elapsed = now - timer->started;
-
-    if (elapsed >= timer->interval) {
-      _sampgdk_timer_fire(i + 1, elapsed);
-    }
-  }
-}
-
-#include "sampgdk.h"
-
-SAMPGDK_API(int, sampgdk_GetVersion(void)) {
-  return SAMPGDK_VERSION_ID;
-}
-
-SAMPGDK_API(const char *, sampgdk_GetVersionString(void)) {
-  return SAMPGDK_VERSION_STRING;
-}
-
-#include <assert.h>
-#include <string.h>
-
-#include "sampgdk.h"
-
-/* #include "internal/amx.h" */
-/* #include "internal/init.h" */
-/* #include "internal/log.h" */
-/* #include "internal/logprintf.h" */
-/* #include "internal/plugin.h" */
-/* #include "internal/timer.h" */
-
-#undef sampgdk_Load
-#undef sampgdk_Unload
-#undef sampgdk_ProcessTick
-
-#ifdef _MSC_VER
-  #include <intrin.h>
-  #define _SAMPGDK_RETURN_ADDRESS() _ReturnAddress()
-#else
-  #define _SAMPGDK_RETURN_ADDRESS() __builtin_return_address(0)
-#endif
-
-#ifdef SAMPGDK_EMBEDDED
-  #define _SAMPGDK_CALLER_HANDLE() \
-    sampgdk_plugin_get_handle(((void *)_sampgdk_init))
-#else
-  #define _SAMPGDK_CALLER_HANDLE() \
-    sampgdk_plugin_get_handle(_SAMPGDK_RETURN_ADDRESS())
-#endif
-
-static void _sampgdk_init(void **plugin_data) {
-  int error;
-
-  sampgdk_logprintf_impl = (logprintf_t)plugin_data[PLUGIN_DATA_LOGPRINTF];
-  sampgdk_amx_api = (struct sampgdk_amx_api *)plugin_data[PLUGIN_DATA_AMX_EXPORTS];
-
-  error = sampgdk_module_init();
-  if (error  < 0) {
-    sampgdk_log_error("Initialization failed: %s", strerror(-error));
-  }
-
-  sampgdk_log_info("Version: " SAMPGDK_VERSION_STRING);
-}
-
-static int _sampgdk_init_plugin(void *plugin, void **plugin_data) {
-  int error;
-  int num_plugins;
-
-  assert(plugin != NULL);
-
-  (void)sampgdk_plugin_get_plugins(&num_plugins);
-  if (num_plugins == 0) {
-    _sampgdk_init(plugin_data);
-  }
-
-  error = sampgdk_plugin_register(plugin);
-  if (error < 0) {
-    sampgdk_log_error("Error registering plugin: %s", strerror(-error));
-  }
-
-  return error;
-}
-
-static void _sampgdk_cleanup(void) {
-  sampgdk_module_cleanup();
-}
-
-static void _sampgdk_cleanup_plugin(void *plugin) {
-  int error;
-  int num_plugins;
-
-  assert(plugin != NULL);
-
-  error = sampgdk_plugin_unregister(plugin);
-  if (error < 0) {
-    sampgdk_log_error("Error unregistering plugin: %s", strerror(-error));
-  }
-
-  (void)sampgdk_plugin_get_plugins(&num_plugins);
-  if (num_plugins == 0) {
-    _sampgdk_cleanup();
-  }
-}
-
-SAMPGDK_API(unsigned int, sampgdk_Supports(void)) {
-  return SUPPORTS_VERSION;
-}
-
-SAMPGDK_API(bool, sampgdk_Load(void **ppData, sampgdk_hidden_t hidden)) {
-  return _sampgdk_init_plugin(_SAMPGDK_CALLER_HANDLE(), ppData) >= 0;
-}
-
-SAMPGDK_API(void, sampgdk_Unload(sampgdk_hidden_t hidden)) {
-  _sampgdk_cleanup_plugin(_SAMPGDK_CALLER_HANDLE());
-}
-
-SAMPGDK_API(void, sampgdk_ProcessTick(sampgdk_hidden_t hidden)) {
-  sampgdk_timer_process_timers(_SAMPGDK_CALLER_HANDLE());
-}
-
-SAMPGDK_API(void, sampgdk_logprintf(const char *format, ...)) {
-  va_list args;
-  va_start(args, format);
-  sampgdk_do_vlogprintf(format, args);
-  va_end(args);
-}
-
-SAMPGDK_API(void, sampgdk_vlogprintf(const char *format, va_list args)) {
-  sampgdk_do_vlogprintf(format, args);
 }
 
 #include <assert.h>
@@ -2654,17 +2610,25 @@ static int AMXAPI _sampgdk_amxhooks_Register(AMX *amx,
                                              int number) {
   int i;
   int count = 0;
-  AMX_HEADER *hdr;
-  AMX_FUNCSTUBNT *natives;
 
   sampgdk_log_debug("amx_Register(%p, %p, %d)", amx, nativelist, number);
 
-  hdr = (AMX_HEADER *)amx->base;
-  natives = (AMX_FUNCSTUBNT *)(amx->base + hdr->natives);
-
-  if (amx_FindNative(amx, "funcidx", &i) == AMX_ERR_NONE) {
-    natives[i].address = (ucell)_sampgdk_amxhooks_funcidx;
+#ifndef SAMPGDK_64BIT
+  /* On 32-bit, override funcidx to work around our FindPublic hook
+   * which always returns success regardless of the actual result.
+   *
+   * On 64-bit (open.mp), funcidx is handled by the server itself,
+   * and (ucell) would truncate the pointer, so skip it.
+   */
+  {
+    AMX_HEADER *hdr = (AMX_HEADER *)amx->base;
+    AMX_FUNCSTUBNT *natives =
+        (AMX_FUNCSTUBNT *)(amx->base + hdr->natives);
+    if (amx_FindNative(amx, "funcidx", &i) == AMX_ERR_NONE) {
+      natives[i].address = (ucell)_sampgdk_amxhooks_funcidx;
+    }
   }
+#endif
 
   for (i = 0; (i < number || number == -1) && nativelist[i].name != NULL; i++) {
     if (sampgdk_native_register(nativelist[i].name, nativelist[i].func) >= 0) {
@@ -2679,7 +2643,8 @@ static int AMXAPI _sampgdk_amxhooks_Register(AMX *amx,
   }
 
   return SAMPGDK_HOOK_CALL_CC(_sampgdk_amxhooks_Register_hook, int, AMXAPI,
-                              (AMX *, const AMX_NATIVE_INFO *, int), (amx, nativelist, number));
+                              (AMX *, const AMX_NATIVE_INFO *, int),
+                              (amx, nativelist, number));
 }
 
 static int AMXAPI _sampgdk_amxhooks_FindPublic(AMX *amx,
@@ -2872,7 +2837,7 @@ static int _sampgdk_amxhooks_create(void) {
   #define _SAMPGDK_AMXHOOKS_CREATE_HOOK(name) \
     if ((_sampgdk_amxhooks_##name##_hook = \
         sampgdk_hook_new((void *)sampgdk_amx_api->name, \
-                         (void *)_sampgdk_amxhooks_##name)) == NULL) \
+                              (void *)_sampgdk_amxhooks_##name)) == NULL) \
       goto no_memory;
   _SAMPGDK_AMXHOOKS_FUNC_LIST(_SAMPGDK_AMXHOOKS_CREATE_HOOK)
   return 0;
@@ -2904,1036 +2869,362 @@ SAMPGDK_MODULE_CLEANUP(amxhooks) {
   _sampgdk_amxhooks_destroy();
 }
 
-#include "sampgdk.h"
-
-/* #include "internal/callback.h" */
-/* #include "internal/fakeamx.h" */
-/* #include "internal/init.h" */
-/* #include "internal/log.h" */
-/* #include "internal/native.h" */
-/* #include "internal/param.h" */
-
-SAMPGDK_NATIVE(int, CreateActor(int modelid, float x, float y, float z, float rotation)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[6];
-  sampgdk_log_debug("CreateActor(%d, %f, %f, %f, %f)", modelid, x, y, z, rotation);
-  native = sampgdk_native_find_flexible("CreateActor", native);
-  params[0] = 5 * sizeof(cell);
-  params[1] = (cell)modelid;
-  params[2] = amx_ftoc(x);
-  params[3] = amx_ftoc(y);
-  params[4] = amx_ftoc(z);
-  params[5] = amx_ftoc(rotation);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return (int)(retval);
-}
-
-SAMPGDK_NATIVE(bool, DestroyActor(int actorid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("DestroyActor(%d)", actorid);
-  native = sampgdk_native_find_flexible("DestroyActor", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)actorid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, IsActorStreamedIn(int actorid, int forplayerid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("IsActorStreamedIn(%d, %d)", actorid, forplayerid);
-  native = sampgdk_native_find_flexible("IsActorStreamedIn", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = (cell)forplayerid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetActorVirtualWorld(int actorid, int vworld)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("SetActorVirtualWorld(%d, %d)", actorid, vworld);
-  native = sampgdk_native_find_flexible("SetActorVirtualWorld", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = (cell)vworld;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(int, GetActorVirtualWorld(int actorid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("GetActorVirtualWorld(%d)", actorid);
-  native = sampgdk_native_find_flexible("GetActorVirtualWorld", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)actorid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return (int)(retval);
-}
-
-SAMPGDK_NATIVE(bool, ApplyActorAnimation(int actorid, const char * animlib, const char * animname, float fDelta, bool loop, bool lockx, bool locky, bool freeze, int time)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[10];
-  cell animlib_;
-  cell animname_;
-  sampgdk_log_debug("ApplyActorAnimation(%d, \"%s\", \"%s\", %f, %d, %d, %d, %d, %d)", actorid, animlib, animname, fDelta, loop, lockx, locky, freeze, time);
-  native = sampgdk_native_find_flexible("ApplyActorAnimation", native);
-  sampgdk_fakeamx_push_string(animlib, NULL, &animlib_);
-  sampgdk_fakeamx_push_string(animname, NULL, &animname_);
-  params[0] = 9 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = animlib_;
-  params[3] = animname_;
-  params[4] = amx_ftoc(fDelta);
-  params[5] = (cell)loop;
-  params[6] = (cell)lockx;
-  params[7] = (cell)locky;
-  params[8] = (cell)freeze;
-  params[9] = (cell)time;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_pop(animname_);
-  sampgdk_fakeamx_pop(animlib_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, ClearActorAnimations(int actorid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("ClearActorAnimations(%d)", actorid);
-  native = sampgdk_native_find_flexible("ClearActorAnimations", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)actorid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetActorPos(int actorid, float x, float y, float z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[5];
-  sampgdk_log_debug("SetActorPos(%d, %f, %f, %f)", actorid, x, y, z);
-  native = sampgdk_native_find_flexible("SetActorPos", native);
-  params[0] = 4 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = amx_ftoc(x);
-  params[3] = amx_ftoc(y);
-  params[4] = amx_ftoc(z);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetActorPos(int actorid, float * x, float * y, float * z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[5];
-  cell x_;
-  cell y_;
-  cell z_;
-  sampgdk_log_debug("GetActorPos(%d, @%p, @%p, @%p)", actorid, x, y, z);
-  native = sampgdk_native_find_flexible("GetActorPos", native);
-  sampgdk_fakeamx_push(1, &x_);
-  sampgdk_fakeamx_push(1, &y_);
-  sampgdk_fakeamx_push(1, &z_);
-  params[0] = 4 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = x_;
-  params[3] = y_;
-  params[4] = z_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_float(x_, x);
-  sampgdk_fakeamx_get_float(y_, y);
-  sampgdk_fakeamx_get_float(z_, z);
-  sampgdk_fakeamx_pop(z_);
-  sampgdk_fakeamx_pop(y_);
-  sampgdk_fakeamx_pop(x_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetActorFacingAngle(int actorid, float angle)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("SetActorFacingAngle(%d, %f)", actorid, angle);
-  native = sampgdk_native_find_flexible("SetActorFacingAngle", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = amx_ftoc(angle);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetActorFacingAngle(int actorid, float * angle)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  cell angle_;
-  sampgdk_log_debug("GetActorFacingAngle(%d, @%p)", actorid, angle);
-  native = sampgdk_native_find_flexible("GetActorFacingAngle", native);
-  sampgdk_fakeamx_push(1, &angle_);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = angle_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_float(angle_, angle);
-  sampgdk_fakeamx_pop(angle_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetActorHealth(int actorid, float health)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("SetActorHealth(%d, %f)", actorid, health);
-  native = sampgdk_native_find_flexible("SetActorHealth", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = amx_ftoc(health);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetActorHealth(int actorid, float * health)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  cell health_;
-  sampgdk_log_debug("GetActorHealth(%d, @%p)", actorid, health);
-  native = sampgdk_native_find_flexible("GetActorHealth", native);
-  sampgdk_fakeamx_push(1, &health_);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = health_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_float(health_, health);
-  sampgdk_fakeamx_pop(health_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetActorInvulnerable(int actorid, bool invulnerable)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("SetActorInvulnerable(%d, %d)", actorid, invulnerable);
-  native = sampgdk_native_find_flexible("SetActorInvulnerable", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)actorid;
-  params[2] = (cell)invulnerable;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, IsActorInvulnerable(int actorid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("IsActorInvulnerable(%d)", actorid);
-  native = sampgdk_native_find_flexible("IsActorInvulnerable", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)actorid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, IsValidActor(int actorid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("IsValidActor(%d)", actorid);
-  native = sampgdk_native_find_flexible("IsValidActor", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)actorid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_MODULE_INIT(a_actor) {
-  return 0;
-}
-
-SAMPGDK_MODULE_CLEANUP(a_actor) {
-}
-
+#include <assert.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 #include "sampgdk.h"
 
-/* #include "internal/callback.h" */
-/* #include "internal/fakeamx.h" */
-/* #include "internal/init.h" */
-/* #include "internal/log.h" */
-/* #include "internal/native.h" */
-/* #include "internal/param.h" */
+#if SAMPGDK_WINDOWS
+  #include <windows.h>
+#endif
 
-SAMPGDK_NATIVE(bool, IsValidVehicle(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("IsValidVehicle(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("IsValidVehicle", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
+/* #include "array.h" */
+/* #include "init.h" */
+/* #include "log.h" */
+/* #include "plugin.h" */
+/* #include "timer.h" */
+/* #include "types.h" */
+
+struct _sampgdk_timer_info {
+  bool    is_set;
+  void   *plugin;
+  int64_t started;
+  int     interval;
+  void   *callback;
+  void   *param;
+  bool    repeat;
+};
+
+static struct sampgdk_array _sampgdk_timers;
+
+#if SAMPGDK_WINDOWS
+
+static int64_t _sampgdk_timer_now(void) {
+  LARGE_INTEGER freq;
+  LARGE_INTEGER counter;
+
+  if (QueryPerformanceFrequency(&freq) == 0) {
+    sampgdk_log_error("QueryPerformanceFrequency: error %d", GetLastError());
+    return 0;
+  }
+  if (QueryPerformanceCounter(&counter) == 0) {
+    sampgdk_log_error("QueryPerformanceCounter: error %d", GetLastError());
+    return 0;
+  }
+
+  return (int64_t)(1000.0L / freq.QuadPart * counter.QuadPart);
 }
 
-SAMPGDK_NATIVE(float, GetVehicleDistanceFromPoint(int vehicleid, float x, float y, float z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[5];
-  sampgdk_log_debug("GetVehicleDistanceFromPoint(%d, %f, %f, %f)", vehicleid, x, y, z);
-  native = sampgdk_native_find_flexible("GetVehicleDistanceFromPoint", native);
-  params[0] = 4 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = amx_ftoc(x);
-  params[3] = amx_ftoc(y);
-  params[4] = amx_ftoc(z);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return amx_ctof(retval);
+#else /* SAMPGDK_WINDOWS */
+
+static int64_t _sampgdk_timer_now(void) {
+  struct timespec ts;
+  int64_t msec;
+  int64_t msec_fract;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
+    sampgdk_log_error("clock_gettime: %s", strerror(errno));
+    return 0;
+  }
+
+  msec = (int64_t)ts.tv_sec * 1000;
+  msec_fract = (int64_t)ts.tv_nsec / 1000000L;
+
+  return msec + msec_fract;
 }
 
-SAMPGDK_NATIVE(int, CreateVehicle(int vehicletype, float x, float y, float z, float rotation, int color1, int color2, int respawn_delay, bool addsiren)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[10];
-  sampgdk_log_debug("CreateVehicle(%d, %f, %f, %f, %f, %d, %d, %d, %d)", vehicletype, x, y, z, rotation, color1, color2, respawn_delay, addsiren);
-  native = sampgdk_native_find_flexible("CreateVehicle", native);
-  params[0] = 9 * sizeof(cell);
-  params[1] = (cell)vehicletype;
-  params[2] = amx_ftoc(x);
-  params[3] = amx_ftoc(y);
-  params[4] = amx_ftoc(z);
-  params[5] = amx_ftoc(rotation);
-  params[6] = (cell)color1;
-  params[7] = (cell)color2;
-  params[8] = (cell)respawn_delay;
-  params[9] = (cell)addsiren;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return (int)(retval);
+#endif /* !SAMPGDK_WINDOWS */
+
+static int _sampgdk_timer_find_slot(void) {
+  int i;
+
+  for (i = 0; i < _sampgdk_timers.count; i++) {
+    struct _sampgdk_timer_info *timer;
+
+    timer = (struct _sampgdk_timer_info *)sampgdk_array_get(&_sampgdk_timers, i);
+    if (!timer->is_set) {
+      return i;
+    }
+  }
+
+  return -1;
 }
 
-SAMPGDK_NATIVE(bool, DestroyVehicle(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("DestroyVehicle(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("DestroyVehicle", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
+static void _sampgdk_timer_fire(int timerid, int64_t elapsed) {
+  struct _sampgdk_timer_info *timer;
+  int64_t now = _sampgdk_timer_now();
+  int64_t started;
+
+  assert(timerid > 0 && timerid <= _sampgdk_timers.count);
+  timer = (struct _sampgdk_timer_info *)sampgdk_array_get(&_sampgdk_timers, timerid - 1);
+
+  assert(timer->is_set);
+  started = timer->started;
+
+  sampgdk_log_debug("Firing timer %d, now = %" PRId64 ", elapsed = %" PRId64,
+      timerid, now, elapsed);
+  ((sampgdk_timer_callback)timer->callback)(timerid, timer->param);
+
+  /* We don't want to kill the same timer twice, so make sure it's not
+   * been killed inside the timer callback.
+   */
+  if (timer->is_set && timer->started == started) {
+    if (timer->repeat) {
+      timer->started = now - (elapsed - timer->interval);
+    } else {
+      sampgdk_timer_kill(timerid);
+    }
+  }
 }
 
-SAMPGDK_NATIVE(bool, IsVehicleStreamedIn(int vehicleid, int forplayerid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("IsVehicleStreamedIn(%d, %d)", vehicleid, forplayerid);
-  native = sampgdk_native_find_flexible("IsVehicleStreamedIn", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)forplayerid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
+SAMPGDK_MODULE_INIT(timer) {
+  int error;
 
-SAMPGDK_NATIVE(bool, GetVehiclePos(int vehicleid, float * x, float * y, float * z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[5];
-  cell x_;
-  cell y_;
-  cell z_;
-  sampgdk_log_debug("GetVehiclePos(%d, @%p, @%p, @%p)", vehicleid, x, y, z);
-  native = sampgdk_native_find_flexible("GetVehiclePos", native);
-  sampgdk_fakeamx_push(1, &x_);
-  sampgdk_fakeamx_push(1, &y_);
-  sampgdk_fakeamx_push(1, &z_);
-  params[0] = 4 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = x_;
-  params[3] = y_;
-  params[4] = z_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_float(x_, x);
-  sampgdk_fakeamx_get_float(y_, y);
-  sampgdk_fakeamx_get_float(z_, z);
-  sampgdk_fakeamx_pop(z_);
-  sampgdk_fakeamx_pop(y_);
-  sampgdk_fakeamx_pop(x_);
-  return !!(retval);
-}
+  error = sampgdk_array_new(&_sampgdk_timers,
+                            8,
+                            sizeof(struct _sampgdk_timer_info));
+  if (error < 0) {
+    return error;
+  }
 
-SAMPGDK_NATIVE(bool, SetVehiclePos(int vehicleid, float x, float y, float z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[5];
-  sampgdk_log_debug("SetVehiclePos(%d, %f, %f, %f)", vehicleid, x, y, z);
-  native = sampgdk_native_find_flexible("SetVehiclePos", native);
-  params[0] = 4 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = amx_ftoc(x);
-  params[3] = amx_ftoc(y);
-  params[4] = amx_ftoc(z);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
+  sampgdk_array_zero(&_sampgdk_timers);
 
-SAMPGDK_NATIVE(bool, GetVehicleZAngle(int vehicleid, float * z_angle)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  cell z_angle_;
-  sampgdk_log_debug("GetVehicleZAngle(%d, @%p)", vehicleid, z_angle);
-  native = sampgdk_native_find_flexible("GetVehicleZAngle", native);
-  sampgdk_fakeamx_push(1, &z_angle_);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = z_angle_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_float(z_angle_, z_angle);
-  sampgdk_fakeamx_pop(z_angle_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetVehicleRotationQuat(int vehicleid, float * w, float * x, float * y, float * z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[6];
-  cell w_;
-  cell x_;
-  cell y_;
-  cell z_;
-  sampgdk_log_debug("GetVehicleRotationQuat(%d, @%p, @%p, @%p, @%p)", vehicleid, w, x, y, z);
-  native = sampgdk_native_find_flexible("GetVehicleRotationQuat", native);
-  sampgdk_fakeamx_push(1, &w_);
-  sampgdk_fakeamx_push(1, &x_);
-  sampgdk_fakeamx_push(1, &y_);
-  sampgdk_fakeamx_push(1, &z_);
-  params[0] = 5 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = w_;
-  params[3] = x_;
-  params[4] = y_;
-  params[5] = z_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_float(w_, w);
-  sampgdk_fakeamx_get_float(x_, x);
-  sampgdk_fakeamx_get_float(y_, y);
-  sampgdk_fakeamx_get_float(z_, z);
-  sampgdk_fakeamx_pop(z_);
-  sampgdk_fakeamx_pop(y_);
-  sampgdk_fakeamx_pop(x_);
-  sampgdk_fakeamx_pop(w_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleZAngle(int vehicleid, float z_angle)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("SetVehicleZAngle(%d, %f)", vehicleid, z_angle);
-  native = sampgdk_native_find_flexible("SetVehicleZAngle", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = amx_ftoc(z_angle);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleParamsForPlayer(int vehicleid, int playerid, int objective, int doorslocked)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[5];
-  sampgdk_log_debug("SetVehicleParamsForPlayer(%d, %d, %d, %d)", vehicleid, playerid, objective, doorslocked);
-  native = sampgdk_native_find_flexible("SetVehicleParamsForPlayer", native);
-  params[0] = 4 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)playerid;
-  params[3] = (cell)objective;
-  params[4] = (cell)doorslocked;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, ManualVehicleEngineAndLights()) {
-  static AMX_NATIVE native;
-  cell retval;
-  sampgdk_log_debug("ManualVehicleEngineAndLights()");
-  native = sampgdk_native_find_flexible("ManualVehicleEngineAndLights", native);
-  retval = native(sampgdk_fakeamx_amx(), NULL);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleParamsEx(int vehicleid, int engine, int lights, int alarm, int doors, int bonnet, int boot, int objective)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[9];
-  sampgdk_log_debug("SetVehicleParamsEx(%d, %d, %d, %d, %d, %d, %d, %d)", vehicleid, engine, lights, alarm, doors, bonnet, boot, objective);
-  native = sampgdk_native_find_flexible("SetVehicleParamsEx", native);
-  params[0] = 8 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)engine;
-  params[3] = (cell)lights;
-  params[4] = (cell)alarm;
-  params[5] = (cell)doors;
-  params[6] = (cell)bonnet;
-  params[7] = (cell)boot;
-  params[8] = (cell)objective;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetVehicleParamsEx(int vehicleid, int * engine, int * lights, int * alarm, int * doors, int * bonnet, int * boot, int * objective)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[9];
-  cell engine_;
-  cell lights_;
-  cell alarm_;
-  cell doors_;
-  cell bonnet_;
-  cell boot_;
-  cell objective_;
-  sampgdk_log_debug("GetVehicleParamsEx(%d, @%p, @%p, @%p, @%p, @%p, @%p, @%p)", vehicleid, engine, lights, alarm, doors, bonnet, boot, objective);
-  native = sampgdk_native_find_flexible("GetVehicleParamsEx", native);
-  sampgdk_fakeamx_push(1, &engine_);
-  sampgdk_fakeamx_push(1, &lights_);
-  sampgdk_fakeamx_push(1, &alarm_);
-  sampgdk_fakeamx_push(1, &doors_);
-  sampgdk_fakeamx_push(1, &bonnet_);
-  sampgdk_fakeamx_push(1, &boot_);
-  sampgdk_fakeamx_push(1, &objective_);
-  params[0] = 8 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = engine_;
-  params[3] = lights_;
-  params[4] = alarm_;
-  params[5] = doors_;
-  params[6] = bonnet_;
-  params[7] = boot_;
-  params[8] = objective_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_cell(engine_, engine);
-  sampgdk_fakeamx_get_cell(lights_, lights);
-  sampgdk_fakeamx_get_cell(alarm_, alarm);
-  sampgdk_fakeamx_get_cell(doors_, doors);
-  sampgdk_fakeamx_get_cell(bonnet_, bonnet);
-  sampgdk_fakeamx_get_cell(boot_, boot);
-  sampgdk_fakeamx_get_cell(objective_, objective);
-  sampgdk_fakeamx_pop(objective_);
-  sampgdk_fakeamx_pop(boot_);
-  sampgdk_fakeamx_pop(bonnet_);
-  sampgdk_fakeamx_pop(doors_);
-  sampgdk_fakeamx_pop(alarm_);
-  sampgdk_fakeamx_pop(lights_);
-  sampgdk_fakeamx_pop(engine_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(int, GetVehicleParamsSirenState(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("GetVehicleParamsSirenState(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("GetVehicleParamsSirenState", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return (int)(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleParamsCarDoors(int vehicleid, int driver, int passenger, int backleft, int backright)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[6];
-  sampgdk_log_debug("SetVehicleParamsCarDoors(%d, %d, %d, %d, %d)", vehicleid, driver, passenger, backleft, backright);
-  native = sampgdk_native_find_flexible("SetVehicleParamsCarDoors", native);
-  params[0] = 5 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)driver;
-  params[3] = (cell)passenger;
-  params[4] = (cell)backleft;
-  params[5] = (cell)backright;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetVehicleParamsCarDoors(int vehicleid, int * driver, int * passenger, int * backleft, int * backright)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[6];
-  cell driver_;
-  cell passenger_;
-  cell backleft_;
-  cell backright_;
-  sampgdk_log_debug("GetVehicleParamsCarDoors(%d, @%p, @%p, @%p, @%p)", vehicleid, driver, passenger, backleft, backright);
-  native = sampgdk_native_find_flexible("GetVehicleParamsCarDoors", native);
-  sampgdk_fakeamx_push(1, &driver_);
-  sampgdk_fakeamx_push(1, &passenger_);
-  sampgdk_fakeamx_push(1, &backleft_);
-  sampgdk_fakeamx_push(1, &backright_);
-  params[0] = 5 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = driver_;
-  params[3] = passenger_;
-  params[4] = backleft_;
-  params[5] = backright_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_cell(driver_, driver);
-  sampgdk_fakeamx_get_cell(passenger_, passenger);
-  sampgdk_fakeamx_get_cell(backleft_, backleft);
-  sampgdk_fakeamx_get_cell(backright_, backright);
-  sampgdk_fakeamx_pop(backright_);
-  sampgdk_fakeamx_pop(backleft_);
-  sampgdk_fakeamx_pop(passenger_);
-  sampgdk_fakeamx_pop(driver_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleParamsCarWindows(int vehicleid, int driver, int passenger, int backleft, int backright)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[6];
-  sampgdk_log_debug("SetVehicleParamsCarWindows(%d, %d, %d, %d, %d)", vehicleid, driver, passenger, backleft, backright);
-  native = sampgdk_native_find_flexible("SetVehicleParamsCarWindows", native);
-  params[0] = 5 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)driver;
-  params[3] = (cell)passenger;
-  params[4] = (cell)backleft;
-  params[5] = (cell)backright;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetVehicleParamsCarWindows(int vehicleid, int * driver, int * passenger, int * backleft, int * backright)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[6];
-  cell driver_;
-  cell passenger_;
-  cell backleft_;
-  cell backright_;
-  sampgdk_log_debug("GetVehicleParamsCarWindows(%d, @%p, @%p, @%p, @%p)", vehicleid, driver, passenger, backleft, backright);
-  native = sampgdk_native_find_flexible("GetVehicleParamsCarWindows", native);
-  sampgdk_fakeamx_push(1, &driver_);
-  sampgdk_fakeamx_push(1, &passenger_);
-  sampgdk_fakeamx_push(1, &backleft_);
-  sampgdk_fakeamx_push(1, &backright_);
-  params[0] = 5 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = driver_;
-  params[3] = passenger_;
-  params[4] = backleft_;
-  params[5] = backright_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_cell(driver_, driver);
-  sampgdk_fakeamx_get_cell(passenger_, passenger);
-  sampgdk_fakeamx_get_cell(backleft_, backleft);
-  sampgdk_fakeamx_get_cell(backright_, backright);
-  sampgdk_fakeamx_pop(backright_);
-  sampgdk_fakeamx_pop(backleft_);
-  sampgdk_fakeamx_pop(passenger_);
-  sampgdk_fakeamx_pop(driver_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleToRespawn(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("SetVehicleToRespawn(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("SetVehicleToRespawn", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, LinkVehicleToInterior(int vehicleid, int interiorid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("LinkVehicleToInterior(%d, %d)", vehicleid, interiorid);
-  native = sampgdk_native_find_flexible("LinkVehicleToInterior", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)interiorid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, AddVehicleComponent(int vehicleid, int componentid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("AddVehicleComponent(%d, %d)", vehicleid, componentid);
-  native = sampgdk_native_find_flexible("AddVehicleComponent", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)componentid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, RemoveVehicleComponent(int vehicleid, int componentid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("RemoveVehicleComponent(%d, %d)", vehicleid, componentid);
-  native = sampgdk_native_find_flexible("RemoveVehicleComponent", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)componentid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, ChangeVehicleColor(int vehicleid, int color1, int color2)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[4];
-  sampgdk_log_debug("ChangeVehicleColor(%d, %d, %d)", vehicleid, color1, color2);
-  native = sampgdk_native_find_flexible("ChangeVehicleColor", native);
-  params[0] = 3 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)color1;
-  params[3] = (cell)color2;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, ChangeVehiclePaintjob(int vehicleid, int paintjobid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("ChangeVehiclePaintjob(%d, %d)", vehicleid, paintjobid);
-  native = sampgdk_native_find_flexible("ChangeVehiclePaintjob", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)paintjobid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleHealth(int vehicleid, float health)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("SetVehicleHealth(%d, %f)", vehicleid, health);
-  native = sampgdk_native_find_flexible("SetVehicleHealth", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = amx_ftoc(health);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetVehicleHealth(int vehicleid, float * health)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  cell health_;
-  sampgdk_log_debug("GetVehicleHealth(%d, @%p)", vehicleid, health);
-  native = sampgdk_native_find_flexible("GetVehicleHealth", native);
-  sampgdk_fakeamx_push(1, &health_);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = health_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_float(health_, health);
-  sampgdk_fakeamx_pop(health_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, AttachTrailerToVehicle(int trailerid, int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("AttachTrailerToVehicle(%d, %d)", trailerid, vehicleid);
-  native = sampgdk_native_find_flexible("AttachTrailerToVehicle", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)trailerid;
-  params[2] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, DetachTrailerFromVehicle(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("DetachTrailerFromVehicle(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("DetachTrailerFromVehicle", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, IsTrailerAttachedToVehicle(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("IsTrailerAttachedToVehicle(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("IsTrailerAttachedToVehicle", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(int, GetVehicleTrailer(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("GetVehicleTrailer(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("GetVehicleTrailer", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return (int)(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleNumberPlate(int vehicleid, const char * numberplate)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  cell numberplate_;
-  sampgdk_log_debug("SetVehicleNumberPlate(%d, \"%s\")", vehicleid, numberplate);
-  native = sampgdk_native_find_flexible("SetVehicleNumberPlate", native);
-  sampgdk_fakeamx_push_string(numberplate, NULL, &numberplate_);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = numberplate_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_pop(numberplate_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(int, GetVehicleModel(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("GetVehicleModel(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("GetVehicleModel", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return (int)(retval);
-}
-
-SAMPGDK_NATIVE(int, GetVehicleComponentInSlot(int vehicleid, int slot)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("GetVehicleComponentInSlot(%d, %d)", vehicleid, slot);
-  native = sampgdk_native_find_flexible("GetVehicleComponentInSlot", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)slot;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return (int)(retval);
-}
-
-SAMPGDK_NATIVE(int, GetVehicleComponentType(int component)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("GetVehicleComponentType(%d)", component);
-  native = sampgdk_native_find_flexible("GetVehicleComponentType", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)component;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return (int)(retval);
-}
-
-SAMPGDK_NATIVE(bool, RepairVehicle(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("RepairVehicle(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("RepairVehicle", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetVehicleVelocity(int vehicleid, float * X, float * Y, float * Z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[5];
-  cell X_;
-  cell Y_;
-  cell Z_;
-  sampgdk_log_debug("GetVehicleVelocity(%d, @%p, @%p, @%p)", vehicleid, X, Y, Z);
-  native = sampgdk_native_find_flexible("GetVehicleVelocity", native);
-  sampgdk_fakeamx_push(1, &X_);
-  sampgdk_fakeamx_push(1, &Y_);
-  sampgdk_fakeamx_push(1, &Z_);
-  params[0] = 4 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = X_;
-  params[3] = Y_;
-  params[4] = Z_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_float(X_, X);
-  sampgdk_fakeamx_get_float(Y_, Y);
-  sampgdk_fakeamx_get_float(Z_, Z);
-  sampgdk_fakeamx_pop(Z_);
-  sampgdk_fakeamx_pop(Y_);
-  sampgdk_fakeamx_pop(X_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleVelocity(int vehicleid, float X, float Y, float Z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[5];
-  sampgdk_log_debug("SetVehicleVelocity(%d, %f, %f, %f)", vehicleid, X, Y, Z);
-  native = sampgdk_native_find_flexible("SetVehicleVelocity", native);
-  params[0] = 4 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = amx_ftoc(X);
-  params[3] = amx_ftoc(Y);
-  params[4] = amx_ftoc(Z);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleAngularVelocity(int vehicleid, float X, float Y, float Z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[5];
-  sampgdk_log_debug("SetVehicleAngularVelocity(%d, %f, %f, %f)", vehicleid, X, Y, Z);
-  native = sampgdk_native_find_flexible("SetVehicleAngularVelocity", native);
-  params[0] = 4 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = amx_ftoc(X);
-  params[3] = amx_ftoc(Y);
-  params[4] = amx_ftoc(Z);
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetVehicleDamageStatus(int vehicleid, int * panels, int * doors, int * lights, int * tires)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[6];
-  cell panels_;
-  cell doors_;
-  cell lights_;
-  cell tires_;
-  sampgdk_log_debug("GetVehicleDamageStatus(%d, @%p, @%p, @%p, @%p)", vehicleid, panels, doors, lights, tires);
-  native = sampgdk_native_find_flexible("GetVehicleDamageStatus", native);
-  sampgdk_fakeamx_push(1, &panels_);
-  sampgdk_fakeamx_push(1, &doors_);
-  sampgdk_fakeamx_push(1, &lights_);
-  sampgdk_fakeamx_push(1, &tires_);
-  params[0] = 5 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = panels_;
-  params[3] = doors_;
-  params[4] = lights_;
-  params[5] = tires_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_cell(panels_, panels);
-  sampgdk_fakeamx_get_cell(doors_, doors);
-  sampgdk_fakeamx_get_cell(lights_, lights);
-  sampgdk_fakeamx_get_cell(tires_, tires);
-  sampgdk_fakeamx_pop(tires_);
-  sampgdk_fakeamx_pop(lights_);
-  sampgdk_fakeamx_pop(doors_);
-  sampgdk_fakeamx_pop(panels_);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, UpdateVehicleDamageStatus(int vehicleid, int panels, int doors, int lights, int tires)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[6];
-  sampgdk_log_debug("UpdateVehicleDamageStatus(%d, %d, %d, %d, %d)", vehicleid, panels, doors, lights, tires);
-  native = sampgdk_native_find_flexible("UpdateVehicleDamageStatus", native);
-  params[0] = 5 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)panels;
-  params[3] = (cell)doors;
-  params[4] = (cell)lights;
-  params[5] = (cell)tires;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(bool, SetVehicleVirtualWorld(int vehicleid, int worldid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[3];
-  sampgdk_log_debug("SetVehicleVirtualWorld(%d, %d)", vehicleid, worldid);
-  native = sampgdk_native_find_flexible("SetVehicleVirtualWorld", native);
-  params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  params[2] = (cell)worldid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return !!(retval);
-}
-
-SAMPGDK_NATIVE(int, GetVehicleVirtualWorld(int vehicleid)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[2];
-  sampgdk_log_debug("GetVehicleVirtualWorld(%d)", vehicleid);
-  native = sampgdk_native_find_flexible("GetVehicleVirtualWorld", native);
-  params[0] = 1 * sizeof(cell);
-  params[1] = (cell)vehicleid;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  return (int)(retval);
-}
-
-SAMPGDK_NATIVE(bool, GetVehicleModelInfo(int model, int infotype, float * X, float * Y, float * Z)) {
-  static AMX_NATIVE native;
-  cell retval;
-  cell params[6];
-  cell X_;
-  cell Y_;
-  cell Z_;
-  sampgdk_log_debug("GetVehicleModelInfo(%d, %d, @%p, @%p, @%p)", model, infotype, X, Y, Z);
-  native = sampgdk_native_find_flexible("GetVehicleModelInfo", native);
-  sampgdk_fakeamx_push(1, &X_);
-  sampgdk_fakeamx_push(1, &Y_);
-  sampgdk_fakeamx_push(1, &Z_);
-  params[0] = 5 * sizeof(cell);
-  params[1] = (cell)model;
-  params[2] = (cell)infotype;
-  params[3] = X_;
-  params[4] = Y_;
-  params[5] = Z_;
-  retval = native(sampgdk_fakeamx_amx(), params);
-  sampgdk_fakeamx_get_float(X_, X);
-  sampgdk_fakeamx_get_float(Y_, Y);
-  sampgdk_fakeamx_get_float(Z_, Z);
-  sampgdk_fakeamx_pop(Z_);
-  sampgdk_fakeamx_pop(Y_);
-  sampgdk_fakeamx_pop(X_);
-  return !!(retval);
-}
-
-SAMPGDK_MODULE_INIT(a_vehicles) {
   return 0;
 }
 
-SAMPGDK_MODULE_CLEANUP(a_vehicles) {
+SAMPGDK_MODULE_CLEANUP(timer) {
+  sampgdk_array_free(&_sampgdk_timers);
 }
 
+int sampgdk_timer_set(int interval,
+                      bool repeat,
+                      sampgdk_timer_callback callback,
+                      void *param) {
+  struct _sampgdk_timer_info timer;
+  int slot;
+  int error;
+  int timerid;
+
+  assert(callback != NULL);
+
+  timer.is_set   = true;
+  timer.interval = interval;
+  timer.repeat   = repeat;
+  timer.callback = (void *)callback;
+  timer.param    = param;
+  timer.started  = _sampgdk_timer_now();
+  timer.plugin   = sampgdk_plugin_get_handle((void *)callback);
+
+  if (timer.started == 0) {
+    return 0; /* error already logged */
+  }
+
+  slot = _sampgdk_timer_find_slot();
+  if (slot >= 0) {
+    sampgdk_array_set(&_sampgdk_timers, slot, &timer);
+  } else {
+    error = sampgdk_array_append(&_sampgdk_timers, &timer);
+    if (error < 0) {
+      sampgdk_log_error("Error setting timer: %s", strerror(-error));
+      return 0;
+    }
+    slot = _sampgdk_timers.count - 1;
+  }
+
+  /* Timer IDs returned by the SA:MP's SetTimer() API begin
+   * with 1, and so do they here.
+   */
+  timerid = slot + 1;
+
+  sampgdk_log_debug("Created timer: ID = %d, interval = %d, repeat = %s",
+      timerid, interval, repeat ? "true" : "false");
+
+  return timerid;
+}
+
+int sampgdk_timer_kill(int timerid) {
+  struct _sampgdk_timer_info *timer;
+
+  if (timerid <= 0 || timerid > _sampgdk_timers.count) {
+    return -EINVAL;
+  }
+
+  timer = (struct _sampgdk_timer_info *)sampgdk_array_get(&_sampgdk_timers, timerid - 1);
+  if (!timer->is_set) {
+    return -EINVAL;
+  }
+
+  timer->is_set = false;
+
+  sampgdk_log_debug("Killed timer %d", timerid);
+
+  return 0;
+}
+
+void sampgdk_timer_process_timers(void *plugin) {
+  int64_t now;
+  int64_t elapsed;
+  int i;
+  struct _sampgdk_timer_info *timer;
+
+  assert(plugin != NULL);
+
+  now = _sampgdk_timer_now();
+
+  for (i = 0; i < _sampgdk_timers.count; i++) {
+    timer = (struct _sampgdk_timer_info *)sampgdk_array_get(&_sampgdk_timers, i);
+
+    if (!timer->is_set
+        || (plugin != NULL && timer->plugin != plugin)) {
+      continue;
+    }
+
+    elapsed = now - timer->started;
+
+    if (elapsed >= timer->interval) {
+      _sampgdk_timer_fire(i + 1, elapsed);
+    }
+  }
+}
+
+#include <assert.h>
+#include <string.h>
+
+#include "sampgdk.h"
+
+/* #include "internal/amx.h" */
+/* #include "internal/init.h" */
+/* #include "internal/log.h" */
+/* #include "internal/logprintf.h" */
+/* #include "internal/plugin.h" */
+/* #include "internal/timer.h" */
+
+#undef sampgdk_Load
+#undef sampgdk_Unload
+#undef sampgdk_ProcessTick
+
+#ifdef _MSC_VER
+  #include <intrin.h>
+  #define _SAMPGDK_RETURN_ADDRESS() _ReturnAddress()
+#else
+  #define _SAMPGDK_RETURN_ADDRESS() __builtin_return_address(0)
+#endif
+
+#ifdef SAMPGDK_EMBEDDED
+  #define _SAMPGDK_CALLER_HANDLE() \
+    sampgdk_plugin_get_handle(((void *)_sampgdk_init))
+#else
+  #define _SAMPGDK_CALLER_HANDLE() \
+    sampgdk_plugin_get_handle(_SAMPGDK_RETURN_ADDRESS())
+#endif
+
+static void _sampgdk_init(void **plugin_data) {
+  int error;
+
+  sampgdk_logprintf_impl = (logprintf_t)plugin_data[PLUGIN_DATA_LOGPRINTF];
+  sampgdk_amx_api =
+      (struct sampgdk_amx_api *)plugin_data[PLUGIN_DATA_AMX_EXPORTS];
+
+  error = sampgdk_module_init();
+  if (error  < 0) {
+    sampgdk_log_error("Initialization failed: %s", strerror(-error));
+  }
+
+  sampgdk_log_info("GDK version: " SAMPGDK_VERSION_STRING);
+}
+
+static int _sampgdk_init_plugin(void *plugin, void **plugin_data) {
+  int error;
+  int num_plugins;
+
+  assert(plugin != NULL);
+
+  (void)sampgdk_plugin_get_plugins(&num_plugins);
+  if (num_plugins == 0) {
+    _sampgdk_init(plugin_data);
+  }
+
+  error = sampgdk_plugin_register(plugin);
+  if (error < 0) {
+    sampgdk_log_error("Error registering plugin: %s", strerror(-error));
+  }
+
+  return error;
+}
+
+static void _sampgdk_cleanup(void) {
+  sampgdk_module_cleanup();
+}
+
+static void _sampgdk_cleanup_plugin(void *plugin) {
+  int error;
+  int num_plugins;
+
+  assert(plugin != NULL);
+
+  error = sampgdk_plugin_unregister(plugin);
+  if (error < 0) {
+    sampgdk_log_error("Error unregistering plugin: %s", strerror(-error));
+  }
+
+  (void)sampgdk_plugin_get_plugins(&num_plugins);
+  if (num_plugins == 0) {
+    _sampgdk_cleanup();
+  }
+}
+
+SAMPGDK_API(unsigned int, sampgdk_Supports(void)) {
+  return SUPPORTS_VERSION;
+}
+
+SAMPGDK_API(bool, sampgdk_Load(void **ppData, sampgdk_hidden_t hidden)) {
+  return _sampgdk_init_plugin(_SAMPGDK_CALLER_HANDLE(), ppData) >= 0;
+}
+
+SAMPGDK_API(void, sampgdk_Unload(sampgdk_hidden_t hidden)) {
+  _sampgdk_cleanup_plugin(_SAMPGDK_CALLER_HANDLE());
+}
+
+SAMPGDK_API(void, sampgdk_ProcessTick(sampgdk_hidden_t hidden)) {
+  sampgdk_timer_process_timers(_SAMPGDK_CALLER_HANDLE());
+}
+
+SAMPGDK_API(void, sampgdk_logprintf(const char *format, ...)) {
+  va_list args;
+  va_start(args, format);
+  sampgdk_do_vlogprintf(format, args);
+  va_end(args);
+}
+
+SAMPGDK_API(void, sampgdk_vlogprintf(const char *format, va_list args)) {
+  sampgdk_do_vlogprintf(format, args);
+}
+
+#include "sampgdk.h"
+
+SAMPGDK_API(int, sampgdk_GetVersion(void)) {
+  return SAMPGDK_VERSION_ID;
+}
+
+SAMPGDK_API(const char *, sampgdk_GetVersionString(void)) {
+  return SAMPGDK_VERSION_STRING;
+}
+
+#include "sampgdk.h"
+
+/* #include "internal/timer.h" */
+
+SAMPGDK_NATIVE(int, SetTimer(int interval, bool repeat, TimerCallback callback,
+                             void *param)) {
+  return sampgdk_timer_set(interval, repeat, callback, param);
+}
+
+SAMPGDK_NATIVE(bool, KillTimer(int timerid)) {
+  return sampgdk_timer_kill(timerid) >= 0;
+}
 
 #include "sampgdk.h"
 
@@ -6341,6 +5632,7 @@ static bool _OnVehiclePaintjob(AMX *amx, void *callback, cell *retval) {
 
 typedef bool (SAMPGDK_CALLBACK_CALL *OnVehicleRespray_callback)(int playerid, int vehicleid, int color1, int color2);
 static bool _OnVehicleRespray(AMX *amx, void *callback, cell *retval) {
+  bool retval_;
   int playerid;
   int vehicleid;
   int color1;
@@ -6350,8 +5642,11 @@ static bool _OnVehicleRespray(AMX *amx, void *callback, cell *retval) {
   sampgdk_param_get_cell(amx, 2, (cell *)&color1);
   sampgdk_param_get_cell(amx, 3, (cell *)&color2);
   sampgdk_log_debug("OnVehicleRespray(%d, %d, %d, %d)", playerid, vehicleid, color1, color2);
-  ((OnVehicleRespray_callback)callback)(playerid, vehicleid, color1, color2);
-  return true;
+  retval_ = ((OnVehicleRespray_callback)callback)(playerid, vehicleid, color1, color2);
+  if (retval != NULL) {
+    *retval = (cell)retval_;
+  }
+  return !!retval_ != false;
 }
 
 typedef bool (SAMPGDK_CALLBACK_CALL *OnVehicleDamageStatusUpdate_callback)(int vehicleid, int playerid);
@@ -7111,16 +6406,263 @@ SAMPGDK_MODULE_CLEANUP(a_samp) {
 
 #include "sampgdk.h"
 
-/* #include "internal/timer.h" */
+/* #include "internal/callback.h" */
+/* #include "internal/fakeamx.h" */
+/* #include "internal/init.h" */
+/* #include "internal/log.h" */
+/* #include "internal/native.h" */
+/* #include "internal/param.h" */
 
-SAMPGDK_NATIVE(int, SetTimer(int interval, bool repeat, TimerCallback callback,
-                             void *param)) {
-  return sampgdk_timer_set(interval, repeat, callback, param);
+SAMPGDK_NATIVE(int, CreateActor(int modelid, float x, float y, float z, float rotation)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[6];
+  sampgdk_log_debug("CreateActor(%d, %f, %f, %f, %f)", modelid, x, y, z, rotation);
+  native = sampgdk_native_find_flexible("CreateActor", native);
+  params[0] = 5 * sizeof(cell);
+  params[1] = (cell)modelid;
+  params[2] = amx_ftoc(x);
+  params[3] = amx_ftoc(y);
+  params[4] = amx_ftoc(z);
+  params[5] = amx_ftoc(rotation);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return (int)(retval);
 }
 
-SAMPGDK_NATIVE(bool, KillTimer(int timerid)) {
-  return sampgdk_timer_kill(timerid) >= 0;
+SAMPGDK_NATIVE(bool, DestroyActor(int actorid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("DestroyActor(%d)", actorid);
+  native = sampgdk_native_find_flexible("DestroyActor", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)actorid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
 }
+
+SAMPGDK_NATIVE(bool, IsActorStreamedIn(int actorid, int forplayerid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("IsActorStreamedIn(%d, %d)", actorid, forplayerid);
+  native = sampgdk_native_find_flexible("IsActorStreamedIn", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = (cell)forplayerid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetActorVirtualWorld(int actorid, int vworld)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("SetActorVirtualWorld(%d, %d)", actorid, vworld);
+  native = sampgdk_native_find_flexible("SetActorVirtualWorld", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = (cell)vworld;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(int, GetActorVirtualWorld(int actorid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("GetActorVirtualWorld(%d)", actorid);
+  native = sampgdk_native_find_flexible("GetActorVirtualWorld", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)actorid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return (int)(retval);
+}
+
+SAMPGDK_NATIVE(bool, ApplyActorAnimation(int actorid, const char * animlib, const char * animname, float fDelta, bool loop, bool lockx, bool locky, bool freeze, int time)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[10];
+  cell animlib_;
+  cell animname_;
+  sampgdk_log_debug("ApplyActorAnimation(%d, \"%s\", \"%s\", %f, %d, %d, %d, %d, %d)", actorid, animlib, animname, fDelta, loop, lockx, locky, freeze, time);
+  native = sampgdk_native_find_flexible("ApplyActorAnimation", native);
+  sampgdk_fakeamx_push_string(animlib, NULL, &animlib_);
+  sampgdk_fakeamx_push_string(animname, NULL, &animname_);
+  params[0] = 9 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = animlib_;
+  params[3] = animname_;
+  params[4] = amx_ftoc(fDelta);
+  params[5] = (cell)loop;
+  params[6] = (cell)lockx;
+  params[7] = (cell)locky;
+  params[8] = (cell)freeze;
+  params[9] = (cell)time;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_pop(animname_);
+  sampgdk_fakeamx_pop(animlib_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, ClearActorAnimations(int actorid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("ClearActorAnimations(%d)", actorid);
+  native = sampgdk_native_find_flexible("ClearActorAnimations", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)actorid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetActorPos(int actorid, float x, float y, float z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  sampgdk_log_debug("SetActorPos(%d, %f, %f, %f)", actorid, x, y, z);
+  native = sampgdk_native_find_flexible("SetActorPos", native);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = amx_ftoc(x);
+  params[3] = amx_ftoc(y);
+  params[4] = amx_ftoc(z);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetActorPos(int actorid, float * x, float * y, float * z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  cell x_;
+  cell y_;
+  cell z_;
+  sampgdk_log_debug("GetActorPos(%d, @%p, @%p, @%p)", actorid, x, y, z);
+  native = sampgdk_native_find_flexible("GetActorPos", native);
+  sampgdk_fakeamx_push(1, &x_);
+  sampgdk_fakeamx_push(1, &y_);
+  sampgdk_fakeamx_push(1, &z_);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = x_;
+  params[3] = y_;
+  params[4] = z_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(x_, x);
+  sampgdk_fakeamx_get_float(y_, y);
+  sampgdk_fakeamx_get_float(z_, z);
+  sampgdk_fakeamx_pop(z_);
+  sampgdk_fakeamx_pop(y_);
+  sampgdk_fakeamx_pop(x_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetActorFacingAngle(int actorid, float angle)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("SetActorFacingAngle(%d, %f)", actorid, angle);
+  native = sampgdk_native_find_flexible("SetActorFacingAngle", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = amx_ftoc(angle);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetActorFacingAngle(int actorid, float * angle)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  cell angle_;
+  sampgdk_log_debug("GetActorFacingAngle(%d, @%p)", actorid, angle);
+  native = sampgdk_native_find_flexible("GetActorFacingAngle", native);
+  sampgdk_fakeamx_push(1, &angle_);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = angle_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(angle_, angle);
+  sampgdk_fakeamx_pop(angle_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetActorHealth(int actorid, float health)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("SetActorHealth(%d, %f)", actorid, health);
+  native = sampgdk_native_find_flexible("SetActorHealth", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = amx_ftoc(health);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetActorHealth(int actorid, float * health)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  cell health_;
+  sampgdk_log_debug("GetActorHealth(%d, @%p)", actorid, health);
+  native = sampgdk_native_find_flexible("GetActorHealth", native);
+  sampgdk_fakeamx_push(1, &health_);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = health_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(health_, health);
+  sampgdk_fakeamx_pop(health_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetActorInvulnerable(int actorid, bool invulnerable)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("SetActorInvulnerable(%d, %d)", actorid, invulnerable);
+  native = sampgdk_native_find_flexible("SetActorInvulnerable", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)actorid;
+  params[2] = (cell)invulnerable;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, IsActorInvulnerable(int actorid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("IsActorInvulnerable(%d)", actorid);
+  native = sampgdk_native_find_flexible("IsActorInvulnerable", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)actorid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, IsValidActor(int actorid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("IsValidActor(%d)", actorid);
+  native = sampgdk_native_find_flexible("IsValidActor", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)actorid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_MODULE_INIT(a_actor) {
+  return 0;
+}
+
+SAMPGDK_MODULE_CLEANUP(a_actor) {
+}
+
 
 #include "sampgdk.h"
 
@@ -10200,6 +9742,777 @@ SAMPGDK_MODULE_INIT(a_players) {
 }
 
 SAMPGDK_MODULE_CLEANUP(a_players) {
+}
+
+
+#include "sampgdk.h"
+
+/* #include "internal/callback.h" */
+/* #include "internal/fakeamx.h" */
+/* #include "internal/init.h" */
+/* #include "internal/log.h" */
+/* #include "internal/native.h" */
+/* #include "internal/param.h" */
+
+SAMPGDK_NATIVE(bool, IsValidVehicle(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("IsValidVehicle(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("IsValidVehicle", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(float, GetVehicleDistanceFromPoint(int vehicleid, float x, float y, float z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  sampgdk_log_debug("GetVehicleDistanceFromPoint(%d, %f, %f, %f)", vehicleid, x, y, z);
+  native = sampgdk_native_find_flexible("GetVehicleDistanceFromPoint", native);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = amx_ftoc(x);
+  params[3] = amx_ftoc(y);
+  params[4] = amx_ftoc(z);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return amx_ctof(retval);
+}
+
+SAMPGDK_NATIVE(int, CreateVehicle(int vehicletype, float x, float y, float z, float rotation, int color1, int color2, int respawn_delay, bool addsiren)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[10];
+  sampgdk_log_debug("CreateVehicle(%d, %f, %f, %f, %f, %d, %d, %d, %d)", vehicletype, x, y, z, rotation, color1, color2, respawn_delay, addsiren);
+  native = sampgdk_native_find_flexible("CreateVehicle", native);
+  params[0] = 9 * sizeof(cell);
+  params[1] = (cell)vehicletype;
+  params[2] = amx_ftoc(x);
+  params[3] = amx_ftoc(y);
+  params[4] = amx_ftoc(z);
+  params[5] = amx_ftoc(rotation);
+  params[6] = (cell)color1;
+  params[7] = (cell)color2;
+  params[8] = (cell)respawn_delay;
+  params[9] = (cell)addsiren;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return (int)(retval);
+}
+
+SAMPGDK_NATIVE(bool, DestroyVehicle(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("DestroyVehicle(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("DestroyVehicle", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, IsVehicleStreamedIn(int vehicleid, int forplayerid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("IsVehicleStreamedIn(%d, %d)", vehicleid, forplayerid);
+  native = sampgdk_native_find_flexible("IsVehicleStreamedIn", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)forplayerid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehiclePos(int vehicleid, float * x, float * y, float * z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  cell x_;
+  cell y_;
+  cell z_;
+  sampgdk_log_debug("GetVehiclePos(%d, @%p, @%p, @%p)", vehicleid, x, y, z);
+  native = sampgdk_native_find_flexible("GetVehiclePos", native);
+  sampgdk_fakeamx_push(1, &x_);
+  sampgdk_fakeamx_push(1, &y_);
+  sampgdk_fakeamx_push(1, &z_);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = x_;
+  params[3] = y_;
+  params[4] = z_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(x_, x);
+  sampgdk_fakeamx_get_float(y_, y);
+  sampgdk_fakeamx_get_float(z_, z);
+  sampgdk_fakeamx_pop(z_);
+  sampgdk_fakeamx_pop(y_);
+  sampgdk_fakeamx_pop(x_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehiclePos(int vehicleid, float x, float y, float z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  sampgdk_log_debug("SetVehiclePos(%d, %f, %f, %f)", vehicleid, x, y, z);
+  native = sampgdk_native_find_flexible("SetVehiclePos", native);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = amx_ftoc(x);
+  params[3] = amx_ftoc(y);
+  params[4] = amx_ftoc(z);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehicleZAngle(int vehicleid, float * z_angle)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  cell z_angle_;
+  sampgdk_log_debug("GetVehicleZAngle(%d, @%p)", vehicleid, z_angle);
+  native = sampgdk_native_find_flexible("GetVehicleZAngle", native);
+  sampgdk_fakeamx_push(1, &z_angle_);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = z_angle_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(z_angle_, z_angle);
+  sampgdk_fakeamx_pop(z_angle_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehicleRotationQuat(int vehicleid, float * w, float * x, float * y, float * z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[6];
+  cell w_;
+  cell x_;
+  cell y_;
+  cell z_;
+  sampgdk_log_debug("GetVehicleRotationQuat(%d, @%p, @%p, @%p, @%p)", vehicleid, w, x, y, z);
+  native = sampgdk_native_find_flexible("GetVehicleRotationQuat", native);
+  sampgdk_fakeamx_push(1, &w_);
+  sampgdk_fakeamx_push(1, &x_);
+  sampgdk_fakeamx_push(1, &y_);
+  sampgdk_fakeamx_push(1, &z_);
+  params[0] = 5 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = w_;
+  params[3] = x_;
+  params[4] = y_;
+  params[5] = z_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(w_, w);
+  sampgdk_fakeamx_get_float(x_, x);
+  sampgdk_fakeamx_get_float(y_, y);
+  sampgdk_fakeamx_get_float(z_, z);
+  sampgdk_fakeamx_pop(z_);
+  sampgdk_fakeamx_pop(y_);
+  sampgdk_fakeamx_pop(x_);
+  sampgdk_fakeamx_pop(w_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleZAngle(int vehicleid, float z_angle)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("SetVehicleZAngle(%d, %f)", vehicleid, z_angle);
+  native = sampgdk_native_find_flexible("SetVehicleZAngle", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = amx_ftoc(z_angle);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleParamsForPlayer(int vehicleid, int playerid, int objective, int doorslocked)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  sampgdk_log_debug("SetVehicleParamsForPlayer(%d, %d, %d, %d)", vehicleid, playerid, objective, doorslocked);
+  native = sampgdk_native_find_flexible("SetVehicleParamsForPlayer", native);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)playerid;
+  params[3] = (cell)objective;
+  params[4] = (cell)doorslocked;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, ManualVehicleEngineAndLights()) {
+  static AMX_NATIVE native;
+  cell retval;
+  sampgdk_log_debug("ManualVehicleEngineAndLights()");
+  native = sampgdk_native_find_flexible("ManualVehicleEngineAndLights", native);
+  retval = native(sampgdk_fakeamx_amx(), NULL);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleParamsEx(int vehicleid, int engine, int lights, int alarm, int doors, int bonnet, int boot, int objective)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[9];
+  sampgdk_log_debug("SetVehicleParamsEx(%d, %d, %d, %d, %d, %d, %d, %d)", vehicleid, engine, lights, alarm, doors, bonnet, boot, objective);
+  native = sampgdk_native_find_flexible("SetVehicleParamsEx", native);
+  params[0] = 8 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)engine;
+  params[3] = (cell)lights;
+  params[4] = (cell)alarm;
+  params[5] = (cell)doors;
+  params[6] = (cell)bonnet;
+  params[7] = (cell)boot;
+  params[8] = (cell)objective;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehicleParamsEx(int vehicleid, int * engine, int * lights, int * alarm, int * doors, int * bonnet, int * boot, int * objective)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[9];
+  cell engine_;
+  cell lights_;
+  cell alarm_;
+  cell doors_;
+  cell bonnet_;
+  cell boot_;
+  cell objective_;
+  sampgdk_log_debug("GetVehicleParamsEx(%d, @%p, @%p, @%p, @%p, @%p, @%p, @%p)", vehicleid, engine, lights, alarm, doors, bonnet, boot, objective);
+  native = sampgdk_native_find_flexible("GetVehicleParamsEx", native);
+  sampgdk_fakeamx_push(1, &engine_);
+  sampgdk_fakeamx_push(1, &lights_);
+  sampgdk_fakeamx_push(1, &alarm_);
+  sampgdk_fakeamx_push(1, &doors_);
+  sampgdk_fakeamx_push(1, &bonnet_);
+  sampgdk_fakeamx_push(1, &boot_);
+  sampgdk_fakeamx_push(1, &objective_);
+  params[0] = 8 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = engine_;
+  params[3] = lights_;
+  params[4] = alarm_;
+  params[5] = doors_;
+  params[6] = bonnet_;
+  params[7] = boot_;
+  params[8] = objective_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_cell(engine_, engine);
+  sampgdk_fakeamx_get_cell(lights_, lights);
+  sampgdk_fakeamx_get_cell(alarm_, alarm);
+  sampgdk_fakeamx_get_cell(doors_, doors);
+  sampgdk_fakeamx_get_cell(bonnet_, bonnet);
+  sampgdk_fakeamx_get_cell(boot_, boot);
+  sampgdk_fakeamx_get_cell(objective_, objective);
+  sampgdk_fakeamx_pop(objective_);
+  sampgdk_fakeamx_pop(boot_);
+  sampgdk_fakeamx_pop(bonnet_);
+  sampgdk_fakeamx_pop(doors_);
+  sampgdk_fakeamx_pop(alarm_);
+  sampgdk_fakeamx_pop(lights_);
+  sampgdk_fakeamx_pop(engine_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(int, GetVehicleParamsSirenState(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("GetVehicleParamsSirenState(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("GetVehicleParamsSirenState", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return (int)(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleParamsCarDoors(int vehicleid, int driver, int passenger, int backleft, int backright)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[6];
+  sampgdk_log_debug("SetVehicleParamsCarDoors(%d, %d, %d, %d, %d)", vehicleid, driver, passenger, backleft, backright);
+  native = sampgdk_native_find_flexible("SetVehicleParamsCarDoors", native);
+  params[0] = 5 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)driver;
+  params[3] = (cell)passenger;
+  params[4] = (cell)backleft;
+  params[5] = (cell)backright;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehicleParamsCarDoors(int vehicleid, int * driver, int * passenger, int * backleft, int * backright)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[6];
+  cell driver_;
+  cell passenger_;
+  cell backleft_;
+  cell backright_;
+  sampgdk_log_debug("GetVehicleParamsCarDoors(%d, @%p, @%p, @%p, @%p)", vehicleid, driver, passenger, backleft, backright);
+  native = sampgdk_native_find_flexible("GetVehicleParamsCarDoors", native);
+  sampgdk_fakeamx_push(1, &driver_);
+  sampgdk_fakeamx_push(1, &passenger_);
+  sampgdk_fakeamx_push(1, &backleft_);
+  sampgdk_fakeamx_push(1, &backright_);
+  params[0] = 5 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = driver_;
+  params[3] = passenger_;
+  params[4] = backleft_;
+  params[5] = backright_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_cell(driver_, driver);
+  sampgdk_fakeamx_get_cell(passenger_, passenger);
+  sampgdk_fakeamx_get_cell(backleft_, backleft);
+  sampgdk_fakeamx_get_cell(backright_, backright);
+  sampgdk_fakeamx_pop(backright_);
+  sampgdk_fakeamx_pop(backleft_);
+  sampgdk_fakeamx_pop(passenger_);
+  sampgdk_fakeamx_pop(driver_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleParamsCarWindows(int vehicleid, int driver, int passenger, int backleft, int backright)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[6];
+  sampgdk_log_debug("SetVehicleParamsCarWindows(%d, %d, %d, %d, %d)", vehicleid, driver, passenger, backleft, backright);
+  native = sampgdk_native_find_flexible("SetVehicleParamsCarWindows", native);
+  params[0] = 5 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)driver;
+  params[3] = (cell)passenger;
+  params[4] = (cell)backleft;
+  params[5] = (cell)backright;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehicleParamsCarWindows(int vehicleid, int * driver, int * passenger, int * backleft, int * backright)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[6];
+  cell driver_;
+  cell passenger_;
+  cell backleft_;
+  cell backright_;
+  sampgdk_log_debug("GetVehicleParamsCarWindows(%d, @%p, @%p, @%p, @%p)", vehicleid, driver, passenger, backleft, backright);
+  native = sampgdk_native_find_flexible("GetVehicleParamsCarWindows", native);
+  sampgdk_fakeamx_push(1, &driver_);
+  sampgdk_fakeamx_push(1, &passenger_);
+  sampgdk_fakeamx_push(1, &backleft_);
+  sampgdk_fakeamx_push(1, &backright_);
+  params[0] = 5 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = driver_;
+  params[3] = passenger_;
+  params[4] = backleft_;
+  params[5] = backright_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_cell(driver_, driver);
+  sampgdk_fakeamx_get_cell(passenger_, passenger);
+  sampgdk_fakeamx_get_cell(backleft_, backleft);
+  sampgdk_fakeamx_get_cell(backright_, backright);
+  sampgdk_fakeamx_pop(backright_);
+  sampgdk_fakeamx_pop(backleft_);
+  sampgdk_fakeamx_pop(passenger_);
+  sampgdk_fakeamx_pop(driver_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleToRespawn(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("SetVehicleToRespawn(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("SetVehicleToRespawn", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, LinkVehicleToInterior(int vehicleid, int interiorid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("LinkVehicleToInterior(%d, %d)", vehicleid, interiorid);
+  native = sampgdk_native_find_flexible("LinkVehicleToInterior", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)interiorid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, AddVehicleComponent(int vehicleid, int componentid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("AddVehicleComponent(%d, %d)", vehicleid, componentid);
+  native = sampgdk_native_find_flexible("AddVehicleComponent", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)componentid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, RemoveVehicleComponent(int vehicleid, int componentid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("RemoveVehicleComponent(%d, %d)", vehicleid, componentid);
+  native = sampgdk_native_find_flexible("RemoveVehicleComponent", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)componentid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, ChangeVehicleColor(int vehicleid, int color1, int color2)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[4];
+  sampgdk_log_debug("ChangeVehicleColor(%d, %d, %d)", vehicleid, color1, color2);
+  native = sampgdk_native_find_flexible("ChangeVehicleColor", native);
+  params[0] = 3 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)color1;
+  params[3] = (cell)color2;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, ChangeVehiclePaintjob(int vehicleid, int paintjobid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("ChangeVehiclePaintjob(%d, %d)", vehicleid, paintjobid);
+  native = sampgdk_native_find_flexible("ChangeVehiclePaintjob", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)paintjobid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleHealth(int vehicleid, float health)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("SetVehicleHealth(%d, %f)", vehicleid, health);
+  native = sampgdk_native_find_flexible("SetVehicleHealth", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = amx_ftoc(health);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehicleHealth(int vehicleid, float * health)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  cell health_;
+  sampgdk_log_debug("GetVehicleHealth(%d, @%p)", vehicleid, health);
+  native = sampgdk_native_find_flexible("GetVehicleHealth", native);
+  sampgdk_fakeamx_push(1, &health_);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = health_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(health_, health);
+  sampgdk_fakeamx_pop(health_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, AttachTrailerToVehicle(int trailerid, int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("AttachTrailerToVehicle(%d, %d)", trailerid, vehicleid);
+  native = sampgdk_native_find_flexible("AttachTrailerToVehicle", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)trailerid;
+  params[2] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, DetachTrailerFromVehicle(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("DetachTrailerFromVehicle(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("DetachTrailerFromVehicle", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, IsTrailerAttachedToVehicle(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("IsTrailerAttachedToVehicle(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("IsTrailerAttachedToVehicle", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(int, GetVehicleTrailer(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("GetVehicleTrailer(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("GetVehicleTrailer", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return (int)(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleNumberPlate(int vehicleid, const char * numberplate)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  cell numberplate_;
+  sampgdk_log_debug("SetVehicleNumberPlate(%d, \"%s\")", vehicleid, numberplate);
+  native = sampgdk_native_find_flexible("SetVehicleNumberPlate", native);
+  sampgdk_fakeamx_push_string(numberplate, NULL, &numberplate_);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = numberplate_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_pop(numberplate_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(int, GetVehicleModel(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("GetVehicleModel(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("GetVehicleModel", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return (int)(retval);
+}
+
+SAMPGDK_NATIVE(int, GetVehicleComponentInSlot(int vehicleid, int slot)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("GetVehicleComponentInSlot(%d, %d)", vehicleid, slot);
+  native = sampgdk_native_find_flexible("GetVehicleComponentInSlot", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)slot;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return (int)(retval);
+}
+
+SAMPGDK_NATIVE(int, GetVehicleComponentType(int component)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("GetVehicleComponentType(%d)", component);
+  native = sampgdk_native_find_flexible("GetVehicleComponentType", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)component;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return (int)(retval);
+}
+
+SAMPGDK_NATIVE(bool, RepairVehicle(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("RepairVehicle(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("RepairVehicle", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehicleVelocity(int vehicleid, float * X, float * Y, float * Z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  cell X_;
+  cell Y_;
+  cell Z_;
+  sampgdk_log_debug("GetVehicleVelocity(%d, @%p, @%p, @%p)", vehicleid, X, Y, Z);
+  native = sampgdk_native_find_flexible("GetVehicleVelocity", native);
+  sampgdk_fakeamx_push(1, &X_);
+  sampgdk_fakeamx_push(1, &Y_);
+  sampgdk_fakeamx_push(1, &Z_);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = X_;
+  params[3] = Y_;
+  params[4] = Z_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(X_, X);
+  sampgdk_fakeamx_get_float(Y_, Y);
+  sampgdk_fakeamx_get_float(Z_, Z);
+  sampgdk_fakeamx_pop(Z_);
+  sampgdk_fakeamx_pop(Y_);
+  sampgdk_fakeamx_pop(X_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleVelocity(int vehicleid, float X, float Y, float Z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  sampgdk_log_debug("SetVehicleVelocity(%d, %f, %f, %f)", vehicleid, X, Y, Z);
+  native = sampgdk_native_find_flexible("SetVehicleVelocity", native);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = amx_ftoc(X);
+  params[3] = amx_ftoc(Y);
+  params[4] = amx_ftoc(Z);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleAngularVelocity(int vehicleid, float X, float Y, float Z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  sampgdk_log_debug("SetVehicleAngularVelocity(%d, %f, %f, %f)", vehicleid, X, Y, Z);
+  native = sampgdk_native_find_flexible("SetVehicleAngularVelocity", native);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = amx_ftoc(X);
+  params[3] = amx_ftoc(Y);
+  params[4] = amx_ftoc(Z);
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehicleDamageStatus(int vehicleid, int * panels, int * doors, int * lights, int * tires)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[6];
+  cell panels_;
+  cell doors_;
+  cell lights_;
+  cell tires_;
+  sampgdk_log_debug("GetVehicleDamageStatus(%d, @%p, @%p, @%p, @%p)", vehicleid, panels, doors, lights, tires);
+  native = sampgdk_native_find_flexible("GetVehicleDamageStatus", native);
+  sampgdk_fakeamx_push(1, &panels_);
+  sampgdk_fakeamx_push(1, &doors_);
+  sampgdk_fakeamx_push(1, &lights_);
+  sampgdk_fakeamx_push(1, &tires_);
+  params[0] = 5 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = panels_;
+  params[3] = doors_;
+  params[4] = lights_;
+  params[5] = tires_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_cell(panels_, panels);
+  sampgdk_fakeamx_get_cell(doors_, doors);
+  sampgdk_fakeamx_get_cell(lights_, lights);
+  sampgdk_fakeamx_get_cell(tires_, tires);
+  sampgdk_fakeamx_pop(tires_);
+  sampgdk_fakeamx_pop(lights_);
+  sampgdk_fakeamx_pop(doors_);
+  sampgdk_fakeamx_pop(panels_);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, UpdateVehicleDamageStatus(int vehicleid, int panels, int doors, int lights, int tires)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[6];
+  sampgdk_log_debug("UpdateVehicleDamageStatus(%d, %d, %d, %d, %d)", vehicleid, panels, doors, lights, tires);
+  native = sampgdk_native_find_flexible("UpdateVehicleDamageStatus", native);
+  params[0] = 5 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)panels;
+  params[3] = (cell)doors;
+  params[4] = (cell)lights;
+  params[5] = (cell)tires;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(bool, SetVehicleVirtualWorld(int vehicleid, int worldid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[3];
+  sampgdk_log_debug("SetVehicleVirtualWorld(%d, %d)", vehicleid, worldid);
+  native = sampgdk_native_find_flexible("SetVehicleVirtualWorld", native);
+  params[0] = 2 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = (cell)worldid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return !!(retval);
+}
+
+SAMPGDK_NATIVE(int, GetVehicleVirtualWorld(int vehicleid)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[2];
+  sampgdk_log_debug("GetVehicleVirtualWorld(%d)", vehicleid);
+  native = sampgdk_native_find_flexible("GetVehicleVirtualWorld", native);
+  params[0] = 1 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  return (int)(retval);
+}
+
+SAMPGDK_NATIVE(bool, GetVehicleModelInfo(int model, int infotype, float * X, float * Y, float * Z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[6];
+  cell X_;
+  cell Y_;
+  cell Z_;
+  sampgdk_log_debug("GetVehicleModelInfo(%d, %d, @%p, @%p, @%p)", model, infotype, X, Y, Z);
+  native = sampgdk_native_find_flexible("GetVehicleModelInfo", native);
+  sampgdk_fakeamx_push(1, &X_);
+  sampgdk_fakeamx_push(1, &Y_);
+  sampgdk_fakeamx_push(1, &Z_);
+  params[0] = 5 * sizeof(cell);
+  params[1] = (cell)model;
+  params[2] = (cell)infotype;
+  params[3] = X_;
+  params[4] = Y_;
+  params[5] = Z_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(X_, X);
+  sampgdk_fakeamx_get_float(Y_, Y);
+  sampgdk_fakeamx_get_float(Z_, Z);
+  sampgdk_fakeamx_pop(Z_);
+  sampgdk_fakeamx_pop(Y_);
+  sampgdk_fakeamx_pop(X_);
+  return !!(retval);
+}
+
+SAMPGDK_MODULE_INIT(a_vehicles) {
+  return 0;
+}
+
+SAMPGDK_MODULE_CLEANUP(a_vehicles) {
 }
 
 

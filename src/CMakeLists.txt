@@ -31,6 +31,19 @@ endif()
 
 add_samp_plugin(${PROJECT_NAME} ${PLUGIN_SOURCES})
 
+if(SAMPGDK_ARCH EQUAL 64)
+	get_target_property(_cmp ${PROJECT_NAME} COMPILE_FLAGS)
+	if(_cmp)
+		string(REPLACE "-m32" "-m64" _cmp "${_cmp}")
+		set_target_properties(${PROJECT_NAME} PROPERTIES COMPILE_FLAGS "${_cmp}")
+	endif()
+	get_target_property(_lnk ${PROJECT_NAME} LINK_FLAGS)
+	if(_lnk)
+		string(REPLACE "-m32" "-m64" _lnk "${_lnk}")
+		set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "${_lnk}")
+	endif()
+endif()
+
 if(WIN32)
 	add_definitions(-DNOMINMAX)
 else()
@@ -43,4 +56,8 @@ add_definitions(-DSAMPGDK_AMALGAMATION -DSAMPGDK_CPP_WRAPPERS -D_SILENCE_CXX17_N
 set_target_properties(${PROJECT_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_link_libraries(${PROJECT_NAME})
 
-install(TARGETS ${PROJECT_NAME} DESTINATION bin)
+install(
+    TARGETS ${PROJECT_NAME}
+    RUNTIME DESTINATION .
+    LIBRARY DESTINATION .
+)

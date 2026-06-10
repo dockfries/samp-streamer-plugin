@@ -37,15 +37,23 @@ int Utility::checkInterfaceAndRegisterNatives(AMX *amx, AMX_NATIVE_INFO *amxNati
 	amx_NumNatives(amx, &numberOfNatives);
 	for (int i = 0; i < numberOfNatives; ++i)
 	{
-		char *name = reinterpret_cast<char*>(amx->base + amxNativeTable[i].nameofs);
-		if (std::string(name).find("Streamer_") != std::string::npos)
+		if (!amxNativeTable[i].address)
 		{
-			foundNatives = true;
-			if (!amxNativeTable[i].address)
+			char *name = reinterpret_cast<char*>(amx->base + amxNativeTable[i].nameofs);
+			if (std::string(name).find("Streamer_") != std::string::npos)
 			{
-				amxNativeTable[i].address = reinterpret_cast<cell>(hookedNative);
+				foundNatives = true;
+				*(uintptr_t *)&amxNativeTable[i] = reinterpret_cast<uintptr_t>(hookedNative);
 				hookedNatives = true;
 			}
+		}
+	}
+	if (!foundNatives)
+	{
+		int idx;
+		if (amx_FindNative(amx, "CreateDynamicObject", &idx) == AMX_ERR_NONE)
+		{
+			foundNatives = true;
 		}
 	}
 	if (foundNatives)

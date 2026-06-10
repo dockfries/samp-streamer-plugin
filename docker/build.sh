@@ -24,4 +24,5 @@ docker run \
     -v $PWD/..:/code \
     -v $PWD/build:/code/build \
     -e CONFIG=${config} \
+    -e ARCH=${ARCH:-64} \
     streamer-omp/build:ubuntu-18.04
