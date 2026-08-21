@@ -1,5 +1,7 @@
 # SA-MP Streamer Plugin
-[![GitHub Release](https://img.shields.io/github/release/samp-incognito/samp-streamer-plugin.svg)](https://github.com/samp-incognito/samp-streamer-plugin/releases/latest) [![Build Status](https://github.com/samp-incognito/samp-streamer-plugin/actions/workflows/build.yml/badge.svg)](https://github.com/samp-incognito/samp-streamer-plugin/actions/workflows/build.yml)
+[![GitHub Release](https://img.shields.io/github/release/dockfries/samp-streamer-plugin.svg)](https://github.com/dockfries/samp-streamer-plugin/releases/latest) [![Build Status](https://github.com/dockfries/samp-streamer-plugin/actions/workflows/build.yml/badge.svg)](https://github.com/dockfries/samp-streamer-plugin/actions/workflows/build.yml)
+
+[**English**](README.md) | [简体中文](README.zh-CN.md)
 
 This plugin streams objects, pickups, checkpoints, race checkpoints, map icons, 3D text labels, and actors at user-defined server ticks. Basic area detection is also included. Because it is written entirely in C++, much of the overhead from PAWN is avoided. This streamer, as a result, is quite a bit faster than any other implementation currently available in PAWN.
 
@@ -9,4 +11,4 @@ Documentation can  be found on the [wiki](https://github.com/samp-incognito/samp
 
 ## Download
 
-The latest binaries for Windows and Linux can be found on the [releases page](https://github.com/samp-incognito/samp-streamer-plugin/releases).
+The latest binaries for Windows and Linux can be found on the [releases page](https://github.com/dockfries/samp-streamer-plugin/releases).
