@@ -3,7 +3,7 @@
     "repo": "samp-streamer-plugin",
     "resources": [
 {
-    "name": "^samp-streamer-plugin-(.*)-linux-i386\\.zip$",
+    "name": "^samp-streamer-plugin-(.*)-linux-i386\\.tar\\.gz$",
     "platform": "linux",
     "archive": true,
     "includes": ["pawno/include"],
