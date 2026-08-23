@@ -33,6 +33,7 @@ jobs:
       with:
         name: streamer-${{ matrix.arch }}-${{ matrix.config }}
         path: package/*.zip
+        archive: false
 
   build-linux:
     runs-on: ubuntu-latest
@@ -57,3 +58,4 @@ jobs:
       with:
         name: streamer-linux-${{ matrix.arch }}-${{ matrix.config }}
         path: docker/build/package/*.tar.gz
+        archive: false

@@ -58,6 +58,8 @@ target_link_libraries(${PROJECT_NAME})
 
 install(
     TARGETS ${PROJECT_NAME}
-    RUNTIME DESTINATION .
-    LIBRARY DESTINATION .
+    RUNTIME DESTINATION plugins
+    LIBRARY DESTINATION plugins
 )
+
+install(FILES ${PROJECT_SOURCE_DIR}/streamer.inc DESTINATION pawno/include)
