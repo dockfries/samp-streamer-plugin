@@ -18402,6 +18402,33 @@ SAMPGDK_NATIVE(int, GetVehicleRespawnTick(int vehicleid)) {
   return (int)(retval);
 }
 
+SAMPGDK_NATIVE(bool, GetVehicleRotation(int vehicleid, float * x, float * y, float * z)) {
+  static AMX_NATIVE native;
+  cell retval;
+  cell params[5];
+  cell x_;
+  cell y_;
+  cell z_;
+  sampgdk_log_debug("GetVehicleRotation(%d, @%p, @%p, @%p)", vehicleid, x, y, z);
+  native = sampgdk_native_find_flexible("GetVehicleRotation", native);
+  sampgdk_fakeamx_push(1, &x_);
+  sampgdk_fakeamx_push(1, &y_);
+  sampgdk_fakeamx_push(1, &z_);
+  params[0] = 4 * sizeof(cell);
+  params[1] = (cell)vehicleid;
+  params[2] = x_;
+  params[3] = y_;
+  params[4] = z_;
+  retval = native(sampgdk_fakeamx_amx(), params);
+  sampgdk_fakeamx_get_float(x_, x);
+  sampgdk_fakeamx_get_float(y_, y);
+  sampgdk_fakeamx_get_float(z_, z);
+  sampgdk_fakeamx_pop(z_);
+  sampgdk_fakeamx_pop(y_);
+  sampgdk_fakeamx_pop(x_);
+  return !!(retval);
+}
+
 SAMPGDK_NATIVE(int, GetVehicleSeats(int vehicleid)) {
   static AMX_NATIVE native;
   cell retval;
@@ -18629,14 +18656,14 @@ SAMPGDK_NATIVE(bool, ToggleVehicleSirenEnabled(int vehicleid, bool enabled)) {
   return !!(retval);
 }
 
-SAMPGDK_NATIVE(bool, VehicleCanHaveComponent(int vehicleid, int componentid)) {
+SAMPGDK_NATIVE(bool, VehicleCanHaveComponent(int modelid, int componentid)) {
   static AMX_NATIVE native;
   cell retval;
   cell params[3];
-  sampgdk_log_debug("VehicleCanHaveComponent(%d, %d)", vehicleid, componentid);
+  sampgdk_log_debug("VehicleCanHaveComponent(%d, %d)", modelid, componentid);
   native = sampgdk_native_find_flexible("VehicleCanHaveComponent", native);
   params[0] = 2 * sizeof(cell);
-  params[1] = (cell)vehicleid;
+  params[1] = (cell)modelid;
   params[2] = (cell)componentid;
   retval = native(sampgdk_fakeamx_amx(), params);
   return !!(retval);

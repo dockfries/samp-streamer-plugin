@@ -9610,7 +9610,7 @@ SAMPGDK_NATIVE(bool, NPC_UseVehicleSiren(int npcid, bool use));
 
 namespace sampgdk {
 
-inline bool NPC_AddPointToPath(int pathid, float x, float y, float z, float stopRange) {
+inline bool NPC_AddPointToPath(int pathid, float x, float y, float z, float stopRange = 0.2) {
   return sampgdk_NPC_AddPointToPath(pathid, x, y, z, stopRange);
 }
 
@@ -9662,11 +9662,11 @@ inline bool NPC_DestroyPath(int pathid) {
   return sampgdk_NPC_DestroyPath(pathid);
 }
 
-inline bool NPC_EnableInfiniteAmmo(int npcid, bool enable) {
+inline bool NPC_EnableInfiniteAmmo(int npcid, bool enable = true) {
   return sampgdk_NPC_EnableInfiniteAmmo(npcid, enable);
 }
 
-inline bool NPC_EnableReloading(int npcid, bool enable) {
+inline bool NPC_EnableReloading(int npcid, bool enable = true) {
   return sampgdk_NPC_EnableReloading(npcid, enable);
 }
 
@@ -9994,7 +9994,7 @@ inline int NPC_LoadRecord(const char * filePath) {
   return sampgdk_NPC_LoadRecord(filePath);
 }
 
-inline bool NPC_MeleeAttack(int npcid, int time, bool secondaryAttack = false) {
+inline bool NPC_MeleeAttack(int npcid, int time = -1, bool secondaryAttack = false) {
   return sampgdk_NPC_MeleeAttack(npcid, time, secondaryAttack);
 }
 
@@ -10014,7 +10014,7 @@ inline bool NPC_OpenNode(int nodeid) {
   return sampgdk_NPC_OpenNode(nodeid);
 }
 
-inline bool NPC_PausePlayback(int npcid, bool paused) {
+inline bool NPC_PausePlayback(int npcid, bool paused = true) {
   return sampgdk_NPC_PausePlayback(npcid, paused);
 }
 
@@ -10094,7 +10094,7 @@ inline int NPC_SetInterior(int npcid, int interiorid) {
   return sampgdk_NPC_SetInterior(npcid, interiorid);
 }
 
-inline int NPC_SetInvulnerable(int npcid, bool toggle) {
+inline int NPC_SetInvulnerable(int npcid, bool toggle = true) {
   return sampgdk_NPC_SetInvulnerable(npcid, toggle);
 }
 
@@ -10198,11 +10198,11 @@ inline int NPC_Spawn(int npcid) {
   return sampgdk_NPC_Spawn(npcid);
 }
 
-inline bool NPC_StartPlayback(int npcid, const char * recordName, bool autoUnload, float startX, float startY, float startZ, float rotX, float rotY, float rotZ) {
+inline bool NPC_StartPlayback(int npcid, const char * recordName, bool autoUnload = false, float startX = 0.0, float startY = 0.0, float startZ = 0.0, float rotX = 0.0, float rotY = 0.0, float rotZ = 0.0) {
   return sampgdk_NPC_StartPlayback(npcid, recordName, autoUnload, startX, startY, startZ, rotX, rotY, rotZ);
 }
 
-inline bool NPC_StartPlaybackEx(int npcid, int recordId, bool autoUnload, float startX, float startY, float startZ, float rotX, float rotY, float rotZ) {
+inline bool NPC_StartPlaybackEx(int npcid, int recordId, bool autoUnload = false, float startX = 0.0, float startY = 0.0, float startZ = 0.0, float rotX = 0.0, float rotY = 0.0, float rotZ = 0.0) {
   return sampgdk_NPC_StartPlaybackEx(npcid, recordId, autoUnload, startX, startY, startZ, rotX, rotY, rotZ);
 }
 
@@ -13116,6 +13116,12 @@ SAMPGDK_NATIVE(int, GetVehicleRespawnTick(int vehicleid));
 
 /**
  * \ingroup natives
+ * \see <a href="https://open.mp/docs/scripting/functions/GetVehicleRotation">GetVehicleRotation on open.mp</a>
+ */
+SAMPGDK_NATIVE(bool, GetVehicleRotation(int vehicleid, float * x, float * y, float * z));
+
+/**
+ * \ingroup natives
  * \see <a href="https://open.mp/docs/scripting/functions/GetVehicleSeats">GetVehicleSeats on open.mp</a>
  */
 SAMPGDK_NATIVE(int, GetVehicleSeats(int vehicleid));
@@ -13208,7 +13214,7 @@ SAMPGDK_NATIVE(bool, ToggleVehicleSirenEnabled(int vehicleid, bool enabled));
  * \ingroup natives
  * \see <a href="https://open.mp/docs/scripting/functions/VehicleCanHaveComponent">VehicleCanHaveComponent on open.mp</a>
  */
-SAMPGDK_NATIVE(bool, VehicleCanHaveComponent(int vehicleid, int componentid));
+SAMPGDK_NATIVE(bool, VehicleCanHaveComponent(int modelid, int componentid));
 
 #ifndef DOXYGEN
 
@@ -13308,6 +13314,10 @@ inline int GetVehicleRespawnTick(int vehicleid) {
   return sampgdk_GetVehicleRespawnTick(vehicleid);
 }
 
+inline bool GetVehicleRotation(int vehicleid, float * x, float * y, float * z) {
+  return sampgdk_GetVehicleRotation(vehicleid, x, y, z);
+}
+
 inline int GetVehicleSeats(int vehicleid) {
   return sampgdk_GetVehicleSeats(vehicleid);
 }
@@ -13368,8 +13378,8 @@ inline bool ToggleVehicleSirenEnabled(int vehicleid, bool enabled) {
   return sampgdk_ToggleVehicleSirenEnabled(vehicleid, enabled);
 }
 
-inline bool VehicleCanHaveComponent(int vehicleid, int componentid) {
-  return sampgdk_VehicleCanHaveComponent(vehicleid, componentid);
+inline bool VehicleCanHaveComponent(int modelid, int componentid) {
+  return sampgdk_VehicleCanHaveComponent(modelid, componentid);
 }
 
 } // namespace sampgdk
@@ -13444,6 +13454,9 @@ inline bool VehicleCanHaveComponent(int vehicleid, int componentid) {
 
 #undef  GetVehicleRespawnTick
 #define GetVehicleRespawnTick sampgdk_GetVehicleRespawnTick
+
+#undef  GetVehicleRotation
+#define GetVehicleRotation sampgdk_GetVehicleRotation
 
 #undef  GetVehicleSeats
 #define GetVehicleSeats sampgdk_GetVehicleSeats
