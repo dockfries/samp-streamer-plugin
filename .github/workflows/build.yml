@@ -15,9 +15,17 @@ jobs:
       with:
         submodules: recursive
 
+    # sampgdk (submodule) runs its Python code generator during configure/build.
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.x"
+
     - uses: TheMrMilchmann/setup-msvc-dev@v4
       with:
         arch: ${{ matrix.arch == 'x64' && 'amd64' || 'x86' }}
+
+    - name: Install sampgdk codegen deps
+      run: python -m pip install ply
 
     - name: Generate build files
       run: |

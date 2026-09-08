@@ -51,7 +51,6 @@
 #include <sampgdk/core.h>
 #include <sampgdk/interop.h>
 #include <sampgdk/a_actor.h>
-#include <sampgdk/a_http.h>
 #include <sampgdk/a_objects.h>
 #include <sampgdk/a_players.h>
 #include <sampgdk/a_samp.h>

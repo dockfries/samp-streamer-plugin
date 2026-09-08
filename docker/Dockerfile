@@ -18,6 +18,8 @@ RUN \
         g++-multilib \
         libstdc++6:i386 \
         libc6:i386 \
+        python3 \
+        python3-pip \
     && \
     useradd -m user
 
