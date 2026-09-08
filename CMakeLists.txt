@@ -34,6 +34,21 @@ include_directories(${EIGEN3_INCLUDE_DIR})
 set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY True)
 set(CMAKE_SKIP_PACKAGE_ALL_DEPENDENCY True)
 
+# sampgdk (and its Zydis/Zycore sub-libraries) are built as separate CMake
+# targets that do not go through the add_samp_plugin macro, so they would not
+# receive the -m32/-m64 flags applied there. Set the architecture globally on
+# UNIX so every target (including the sampgdk subdirectory) is compiled for
+# the same word size as the plugin module.
+if(UNIX AND NOT MSVC)
+	if(SAMPGDK_ARCH EQUAL 64)
+		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -m64")
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -m64")
+	else()
+		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -m32")
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -m32")
+	endif()
+endif()
+
 # sampgdk is consumed as a git submodule (lib/sampgdk). Build it as a static,
 # full library (the streamer calls sampgdk's IDL native wrappers directly,
 # which the tiny build does not provide) and link it into the plugin module.
