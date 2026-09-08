@@ -34,6 +34,17 @@ include_directories(${EIGEN3_INCLUDE_DIR})
 set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY True)
 set(CMAKE_SKIP_PACKAGE_ALL_DEPENDENCY True)
 
+# sampgdk is consumed as a git submodule (lib/sampgdk). Build it as a static,
+# full library (the streamer calls sampgdk's IDL native wrappers directly,
+# which the tiny build does not provide) and link it into the plugin module.
+set(SAMPGDK_STATIC ON CACHE BOOL "" FORCE)
+set(SAMPGDK_TINY OFF CACHE BOOL "" FORCE)
+set(SAMPGDK_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(SAMPGDK_BUILD_PLUGINS OFF CACHE BOOL "" FORCE)
+set(SAMP_SDK_ROOT "${PROJECT_SOURCE_DIR}/lib/samp-plugin-sdk")
+
+add_subdirectory(lib/sampgdk sampgdk)
+
 add_subdirectory(src)
 
 set(CPACK_PACKAGE_VERSION ${PLUGIN_VERSION})
@@ -77,5 +88,11 @@ if(CPACK_OUTPUT_FILE_POSTFIX)
 	string(TOLOWER "${CPACK_OUTPUT_FILE_POSTFIX}" CPACK_OUTPUT_FILE_POSTFIX)
 	set(CPACK_PACKAGE_FILE_NAME ${CPACK_PACKAGE_FILE_NAME}-${CPACK_OUTPUT_FILE_POSTFIX})
 endif()
+
+# Third-party deps pulled in via add_subdirectory (sampgdk -> zydis/zycore)
+# register install() rules that land in lib/ and include/ of the staging
+# area. Strip them after staging and before packaging (CPACK_PRE_BUILD_SCRIPTS
+# runs post-install, pre-archive) so the archive only ships the plugin.
+set(CPACK_PRE_BUILD_SCRIPTS ${PROJECT_SOURCE_DIR}/cmake/cpack_strip.cmake)
 
 include(CPack)

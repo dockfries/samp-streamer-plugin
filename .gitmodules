@@ -10,3 +10,6 @@
 [submodule "lib/boost"]
 	path = lib/boost
 	url = git@github.com:scipy/boost-headers-only.git
+[submodule "lib/sampgdk"]
+	path = lib/sampgdk
+	url = https://github.com/dockfries/sampgdk-backup.git
