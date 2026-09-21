@@ -65,6 +65,18 @@ struct Player
 	Item::Bimap<Item::SharedObject>::Type existingObjects;
 	Item::Bimap<Item::SharedTextLabel>::Type existingTextLabels;
 
+	// Scratch candidate lists for the non-chunk streaming passes. Held on the
+	// player rather than rebuilt per update so those passes stop allocating a
+	// fresh container (and a tree node per candidate) every single time.
+	std::vector<Item::Candidate<Item::SharedCheckpoint> > discoveredCheckpointCandidates;
+	std::vector<Item::Candidate<Item::SharedMapIcon> > discoveredMapIconCandidates;
+	std::vector<Item::Candidate<Item::SharedMapIcon> > existingMapIconCandidates;
+	std::vector<Item::Candidate<Item::SharedObject> > discoveredObjectCandidates;
+	std::vector<Item::Candidate<Item::SharedObject> > existingObjectCandidates;
+	std::vector<Item::Candidate<Item::SharedRaceCheckpoint> > discoveredRaceCheckpointCandidates;
+	std::vector<Item::Candidate<Item::SharedTextLabel> > discoveredTextLabelCandidates;
+	std::vector<Item::Candidate<Item::SharedTextLabel> > existingTextLabelCandidates;
+
 	std::unordered_set<int> internalAreas;
 	std::unordered_map<int, int> internalMapIcons;
 	std::unordered_map<int, int> internalObjects;
