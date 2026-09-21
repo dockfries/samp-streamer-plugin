@@ -26,7 +26,6 @@ public:
 	Cell(CellId cellId);
 
 	CellId cellId;
-	int references;
 
 	std::unordered_map<int, Item::SharedActor> actors;
 	std::unordered_map<int, Item::SharedArea> areas;

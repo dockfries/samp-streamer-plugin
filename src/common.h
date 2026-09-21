@@ -31,16 +31,12 @@
 #define STREAMER_TYPE_AREA (6)
 #define STREAMER_TYPE_ACTOR (7)
 
-#define STREAMER_MAX_AREA_TYPES (6)
-
 #define STREAMER_AREA_TYPE_CIRCLE (0)
 #define STREAMER_AREA_TYPE_CYLINDER (1)
 #define STREAMER_AREA_TYPE_SPHERE (2)
 #define STREAMER_AREA_TYPE_RECTANGLE (3)
 #define STREAMER_AREA_TYPE_CUBOID (4)
 #define STREAMER_AREA_TYPE_POLYGON (5)
-
-#define STREAMER_MAX_OBJECT_TYPES (3)
 
 #define STREAMER_OBJECT_TYPE_GLOBAL (0)
 #define STREAMER_OBJECT_TYPE_PLAYER (1)
@@ -50,7 +46,6 @@
 
 class Cell;
 class Data;
-class Events;
 class Grid;
 class Identifier;
 struct Player;

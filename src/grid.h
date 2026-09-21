@@ -51,7 +51,6 @@ public:
 	inline void setCellDistance(float distance)
 	{
 		cellDistance = distance;
-		comparableCellDistance = distance * distance;
 	}
 
 	void rebuildGrid();
@@ -72,7 +71,6 @@ public:
 private:
 	float cellDistance;
 	float cellSize;
-	float comparableCellDistance;
 	SharedCell globalCell;
 
 	std::unordered_map<CellId, SharedCell, pair_hash> cells;
