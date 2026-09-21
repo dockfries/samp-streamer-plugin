@@ -59,29 +59,36 @@ void Streamer::startAutomaticUpdate()
 			bool updatedActiveItems = false;
 			for (std::unordered_map<int, Player>::iterator p = core->getData()->players.begin(); p != core->getData()->players.end(); ++p)
 			{
-				if (core->getChunkStreamer()->getChunkStreamingEnabled() && p->second.processingChunks.any())
+				// Draining a pending chunk queue must not starve the regular
+				// update. The old code took the chunk branch *instead of* the
+				// tick gate and never incremented tickCount, so
+				// performPlayerUpdate (and with it every area, checkpoint and
+				// race checkpoint check) was skipped for as long as a player had
+				// chunks pending. If every player was in that state,
+				// processActiveItems() never ran at all, freezing moving and
+				// attached objects. Advancing the tick gate unconditionally and
+				// only draining as a fallback keeps both on their normal
+				// cadence without slowing the drain down.
+				if (++p->second.tickCount >= p->second.tickRate)
+				{
+					if (!updatedActiveItems)
+					{
+						processActiveItems();
+						updatedActiveItems = true;
+					}
+					if (!p->second.delayedUpdate)
+					{
+						performPlayerUpdate(p->second, true);
+					}
+					else
+					{
+						startManualUpdate(p->second, p->second.delayedUpdateType);
+					}
+					p->second.tickCount = 0;
+				}
+				else if (core->getChunkStreamer()->getChunkStreamingEnabled() && p->second.processingChunks.any())
 				{
 					core->getChunkStreamer()->performPlayerChunkUpdate(p->second, true);
-				}
-				else
-				{
-					if (++p->second.tickCount >= p->second.tickRate)
-					{
-						if (!updatedActiveItems)
-						{
-							processActiveItems();
-							updatedActiveItems = true;
-						}
-						if (!p->second.delayedUpdate)
-						{
-							performPlayerUpdate(p->second, true);
-						}
-						else
-						{
-							startManualUpdate(p->second, p->second.delayedUpdateType);
-						}
-						p->second.tickCount = 0;
-					}
 				}
 			}
 		}
