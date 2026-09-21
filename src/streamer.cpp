@@ -299,15 +299,16 @@ void Streamer::performPlayerUpdate(Player &player, bool automatic)
 			player.delayedRaceCheckpoint = 0;
 		}
 	}
+	// Nothing below touches the grid when the player is idle and idle updates
+	// are disabled: the cell lookup would be computed and then thrown away by
+	// the type loop below, so skip it entirely. This is the common case for
+	// players that are not moving.
+	if (!update)
+	{
+		return;
+	}
 	std::vector<SharedCell> cells;
-	if (update)
-	{
-		core->getGrid()->findAllCellsForPlayer(player, cells);
-	}
-	else
-	{
-		core->getGrid()->findMinimalCellsForPlayer(player, cells);
-	}
+	core->getGrid()->findAllCellsForPlayer(player, cells);
 	if (!cells.empty())
 	{
 		if (!delta.isZero())
@@ -316,87 +317,84 @@ void Streamer::performPlayerUpdate(Player &player, bool automatic)
 		}
 		for (std::vector<int>::const_iterator t = core->getData()->typePriority.begin(); t != core->getData()->typePriority.end(); ++t)
 		{
-			if (update)
+			switch (*t)
 			{
-				switch (*t)
+				case STREAMER_TYPE_OBJECT:
 				{
-					case STREAMER_TYPE_OBJECT:
+					if (!core->getData()->objects.empty() && player.enabledItems[STREAMER_TYPE_OBJECT])
 					{
-						if (!core->getData()->objects.empty() && player.enabledItems[STREAMER_TYPE_OBJECT])
+						if (core->getChunkStreamer()->getChunkStreamingEnabled())
 						{
-							if (core->getChunkStreamer()->getChunkStreamingEnabled())
-							{
-								core->getChunkStreamer()->discoverObjects(player, cells);
-							}
-							else
-							{
-								processObjects(player, cells);
-							}
+							core->getChunkStreamer()->discoverObjects(player, cells);
 						}
-						break;
+						else
+						{
+							processObjects(player, cells);
+						}
 					}
-					case STREAMER_TYPE_CP:
+					break;
+				}
+				case STREAMER_TYPE_CP:
+				{
+					if (!core->getData()->checkpoints.empty() && player.enabledItems[STREAMER_TYPE_CP])
 					{
-						if (!core->getData()->checkpoints.empty() && player.enabledItems[STREAMER_TYPE_CP])
-						{
-							processCheckpoints(player, cells);
-						}
-						break;
+						processCheckpoints(player, cells);
 					}
-					case STREAMER_TYPE_RACE_CP:
+					break;
+				}
+				case STREAMER_TYPE_RACE_CP:
+				{
+					if (!core->getData()->raceCheckpoints.empty() && player.enabledItems[STREAMER_TYPE_RACE_CP])
 					{
-						if (!core->getData()->raceCheckpoints.empty() && player.enabledItems[STREAMER_TYPE_RACE_CP])
-						{
-							processRaceCheckpoints(player, cells);
-						}
-						break;
+						processRaceCheckpoints(player, cells);
 					}
-					case STREAMER_TYPE_MAP_ICON:
+					break;
+				}
+				case STREAMER_TYPE_MAP_ICON:
+				{
+					if (!core->getData()->mapIcons.empty() && player.enabledItems[STREAMER_TYPE_MAP_ICON])
 					{
-						if (!core->getData()->mapIcons.empty() && player.enabledItems[STREAMER_TYPE_MAP_ICON])
+						if (core->getChunkStreamer()->getChunkStreamingEnabled())
 						{
-							if (core->getChunkStreamer()->getChunkStreamingEnabled())
-							{
-								core->getChunkStreamer()->discoverMapIcons(player, cells);
-							}
-							else
-							{
-								processMapIcons(player, cells);
-							}
+							core->getChunkStreamer()->discoverMapIcons(player, cells);
 						}
-						break;
+						else
+						{
+							processMapIcons(player, cells);
+						}
 					}
-					case STREAMER_TYPE_3D_TEXT_LABEL:
+					break;
+				}
+				case STREAMER_TYPE_3D_TEXT_LABEL:
+				{
+					if (!core->getData()->textLabels.empty() && player.enabledItems[STREAMER_TYPE_3D_TEXT_LABEL])
 					{
-						if (!core->getData()->textLabels.empty() && player.enabledItems[STREAMER_TYPE_3D_TEXT_LABEL])
+						if (core->getChunkStreamer()->getChunkStreamingEnabled())
 						{
-							if (core->getChunkStreamer()->getChunkStreamingEnabled())
-							{
-								core->getChunkStreamer()->discoverTextLabels(player, cells);
-							}
-							else
-							{
-								processTextLabels(player, cells);
-							}
+							core->getChunkStreamer()->discoverTextLabels(player, cells);
 						}
-						break;
+						else
+						{
+							processTextLabels(player, cells);
+						}
 					}
-					case STREAMER_TYPE_AREA:
+					break;
+				}
+				case STREAMER_TYPE_AREA:
+				{
+					if (!core->getData()->areas.empty() && player.enabledItems[STREAMER_TYPE_AREA])
 					{
-						if (!core->getData()->areas.empty() && player.enabledItems[STREAMER_TYPE_AREA])
+						if (!delta.isZero())
 						{
-							if (!delta.isZero())
-							{
-								player.position = position;
-							}
-							processAreas(player, cells);
-							if (!delta.isZero())
-							{
-								player.position += delta;
-							}
+							player.position = position;
 						}
-						break;
+						processAreas(player, cells);
+						if (!delta.isZero())
+						{
+							player.position += delta;
+						}
 					}
+					break;
 				}
 			}
 		}
