@@ -90,18 +90,6 @@ namespace Item
 		}
 	};
 
-	struct PairCompare
-	{
-		bool operator()(std::pair<int, float> const &a, std::pair<int, float> const &b) const
-		{
-			if (a.first != b.first)
-			{
-				return a.first > b.first;
-			}
-			return a.second < b.second;
-		}
-	};
-
 	template<typename T>
 	struct LeftTupleCompare
 	{

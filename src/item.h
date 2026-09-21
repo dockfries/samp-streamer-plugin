@@ -407,9 +407,10 @@ namespace Item
 		T item;
 	};
 
-	// Ordering copied verbatim from PairCompare: higher priority value first,
-	// then nearest first. std::sort(a, b, comp) yields the same sequence the
-	// multimap iterated in.
+	// Higher priority value first, then nearest first -- the same ordering the
+	// per-player discovered multimaps used to iterate in, so std::sort (or
+	// std::min_element) over a candidate vector hands the streamer the items in
+	// exactly the sequence the multimap produced.
 	template<typename T>
 	struct CandidateCompare
 	{
