@@ -59,29 +59,36 @@ void Streamer::startAutomaticUpdate()
 			bool updatedActiveItems = false;
 			for (std::unordered_map<int, Player>::iterator p = core->getData()->players.begin(); p != core->getData()->players.end(); ++p)
 			{
-				if (core->getChunkStreamer()->getChunkStreamingEnabled() && p->second.processingChunks.any())
+				// Draining a pending chunk queue must not starve the regular
+				// update. The old code took the chunk branch *instead of* the
+				// tick gate and never incremented tickCount, so
+				// performPlayerUpdate (and with it every area, checkpoint and
+				// race checkpoint check) was skipped for as long as a player had
+				// chunks pending. If every player was in that state,
+				// processActiveItems() never ran at all, freezing moving and
+				// attached objects. Advancing the tick gate unconditionally and
+				// only draining as a fallback keeps both on their normal
+				// cadence without slowing the drain down.
+				if (++p->second.tickCount >= p->second.tickRate)
+				{
+					if (!updatedActiveItems)
+					{
+						processActiveItems();
+						updatedActiveItems = true;
+					}
+					if (!p->second.delayedUpdate)
+					{
+						performPlayerUpdate(p->second, true);
+					}
+					else
+					{
+						startManualUpdate(p->second, p->second.delayedUpdateType);
+					}
+					p->second.tickCount = 0;
+				}
+				else if (core->getChunkStreamer()->getChunkStreamingEnabled() && p->second.processingChunks.any())
 				{
 					core->getChunkStreamer()->performPlayerChunkUpdate(p->second, true);
-				}
-				else
-				{
-					if (++p->second.tickCount >= p->second.tickRate)
-					{
-						if (!updatedActiveItems)
-						{
-							processActiveItems();
-							updatedActiveItems = true;
-						}
-						if (!p->second.delayedUpdate)
-						{
-							performPlayerUpdate(p->second, true);
-						}
-						else
-						{
-							startManualUpdate(p->second, p->second.delayedUpdateType);
-						}
-						p->second.tickCount = 0;
-					}
 				}
 			}
 		}
@@ -292,15 +299,16 @@ void Streamer::performPlayerUpdate(Player &player, bool automatic)
 			player.delayedRaceCheckpoint = 0;
 		}
 	}
+	// Nothing below touches the grid when the player is idle and idle updates
+	// are disabled: the cell lookup would be computed and then thrown away by
+	// the type loop below, so skip it entirely. This is the common case for
+	// players that are not moving.
+	if (!update)
+	{
+		return;
+	}
 	std::vector<SharedCell> cells;
-	if (update)
-	{
-		core->getGrid()->findAllCellsForPlayer(player, cells);
-	}
-	else
-	{
-		core->getGrid()->findMinimalCellsForPlayer(player, cells);
-	}
+	core->getGrid()->findAllCellsForPlayer(player, cells);
 	if (!cells.empty())
 	{
 		if (!delta.isZero())
@@ -309,87 +317,84 @@ void Streamer::performPlayerUpdate(Player &player, bool automatic)
 		}
 		for (std::vector<int>::const_iterator t = core->getData()->typePriority.begin(); t != core->getData()->typePriority.end(); ++t)
 		{
-			if (update)
+			switch (*t)
 			{
-				switch (*t)
+				case STREAMER_TYPE_OBJECT:
 				{
-					case STREAMER_TYPE_OBJECT:
+					if (!core->getData()->objects.empty() && player.enabledItems[STREAMER_TYPE_OBJECT])
 					{
-						if (!core->getData()->objects.empty() && player.enabledItems[STREAMER_TYPE_OBJECT])
+						if (core->getChunkStreamer()->getChunkStreamingEnabled())
 						{
-							if (core->getChunkStreamer()->getChunkStreamingEnabled())
-							{
-								core->getChunkStreamer()->discoverObjects(player, cells);
-							}
-							else
-							{
-								processObjects(player, cells);
-							}
+							core->getChunkStreamer()->discoverObjects(player, cells);
 						}
-						break;
+						else
+						{
+							processObjects(player, cells);
+						}
 					}
-					case STREAMER_TYPE_CP:
+					break;
+				}
+				case STREAMER_TYPE_CP:
+				{
+					if (!core->getData()->checkpoints.empty() && player.enabledItems[STREAMER_TYPE_CP])
 					{
-						if (!core->getData()->checkpoints.empty() && player.enabledItems[STREAMER_TYPE_CP])
-						{
-							processCheckpoints(player, cells);
-						}
-						break;
+						processCheckpoints(player, cells);
 					}
-					case STREAMER_TYPE_RACE_CP:
+					break;
+				}
+				case STREAMER_TYPE_RACE_CP:
+				{
+					if (!core->getData()->raceCheckpoints.empty() && player.enabledItems[STREAMER_TYPE_RACE_CP])
 					{
-						if (!core->getData()->raceCheckpoints.empty() && player.enabledItems[STREAMER_TYPE_RACE_CP])
-						{
-							processRaceCheckpoints(player, cells);
-						}
-						break;
+						processRaceCheckpoints(player, cells);
 					}
-					case STREAMER_TYPE_MAP_ICON:
+					break;
+				}
+				case STREAMER_TYPE_MAP_ICON:
+				{
+					if (!core->getData()->mapIcons.empty() && player.enabledItems[STREAMER_TYPE_MAP_ICON])
 					{
-						if (!core->getData()->mapIcons.empty() && player.enabledItems[STREAMER_TYPE_MAP_ICON])
+						if (core->getChunkStreamer()->getChunkStreamingEnabled())
 						{
-							if (core->getChunkStreamer()->getChunkStreamingEnabled())
-							{
-								core->getChunkStreamer()->discoverMapIcons(player, cells);
-							}
-							else
-							{
-								processMapIcons(player, cells);
-							}
+							core->getChunkStreamer()->discoverMapIcons(player, cells);
 						}
-						break;
+						else
+						{
+							processMapIcons(player, cells);
+						}
 					}
-					case STREAMER_TYPE_3D_TEXT_LABEL:
+					break;
+				}
+				case STREAMER_TYPE_3D_TEXT_LABEL:
+				{
+					if (!core->getData()->textLabels.empty() && player.enabledItems[STREAMER_TYPE_3D_TEXT_LABEL])
 					{
-						if (!core->getData()->textLabels.empty() && player.enabledItems[STREAMER_TYPE_3D_TEXT_LABEL])
+						if (core->getChunkStreamer()->getChunkStreamingEnabled())
 						{
-							if (core->getChunkStreamer()->getChunkStreamingEnabled())
-							{
-								core->getChunkStreamer()->discoverTextLabels(player, cells);
-							}
-							else
-							{
-								processTextLabels(player, cells);
-							}
+							core->getChunkStreamer()->discoverTextLabels(player, cells);
 						}
-						break;
+						else
+						{
+							processTextLabels(player, cells);
+						}
 					}
-					case STREAMER_TYPE_AREA:
+					break;
+				}
+				case STREAMER_TYPE_AREA:
+				{
+					if (!core->getData()->areas.empty() && player.enabledItems[STREAMER_TYPE_AREA])
 					{
-						if (!core->getData()->areas.empty() && player.enabledItems[STREAMER_TYPE_AREA])
+						if (!delta.isZero())
 						{
-							if (!delta.isZero())
-							{
-								player.position = position;
-							}
-							processAreas(player, cells);
-							if (!delta.isZero())
-							{
-								player.position += delta;
-							}
+							player.position = position;
 						}
-						break;
+						processAreas(player, cells);
+						if (!delta.isZero())
+						{
+							player.position += delta;
+						}
 					}
+					break;
 				}
 			}
 		}
@@ -732,7 +737,8 @@ bool Streamer::processPlayerArea(Player &player, const Item::SharedArea &a, cons
 
 void Streamer::processCheckpoints(Player &player, const std::vector<SharedCell> &cells)
 {
-	std::multimap<std::pair<int, float>, Item::SharedCheckpoint, Item::PairCompare> discoveredCheckpoints;
+	std::vector<Item::Candidate<Item::SharedCheckpoint> > &discoveredCheckpoints = player.discoveredCheckpointCandidates;
+	discoveredCheckpoints.clear();
 	for (std::vector<SharedCell>::const_iterator c = cells.begin(); c != cells.end(); ++c)
 	{
 		for (std::unordered_map<int, Item::SharedCheckpoint>::const_iterator d = (*c)->checkpoints.begin(); d != (*c)->checkpoints.end(); ++d)
@@ -751,7 +757,7 @@ void Streamer::processCheckpoints(Player &player, const std::vector<SharedCell> 
 			}
 			if (distance < (d->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_CP]))
 			{
-				discoveredCheckpoints.insert(std::make_pair(std::make_pair(d->second->priority, distance), d->second));
+				discoveredCheckpoints.push_back(Item::Candidate<Item::SharedCheckpoint>(d->second->priority, distance, d->second));
 			}
 			else
 			{
@@ -771,30 +777,35 @@ void Streamer::processCheckpoints(Player &player, const std::vector<SharedCell> 
 	}
 	if (!discoveredCheckpoints.empty())
 	{
-		std::multimap<std::pair<int, float>, Item::SharedCheckpoint, Item::PairCompare>::iterator d = discoveredCheckpoints.begin();
-		if (d->second->checkpointId != player.visibleCheckpoint)
+		// Only the best candidate is ever used, so a min_element under the same
+		// comparator replaces the multimap's begin() without a full sort.
+		const Item::SharedCheckpoint &checkpoint = std::min_element(discoveredCheckpoints.begin(), discoveredCheckpoints.end(), Item::CandidateCompare<Item::SharedCheckpoint>())->item;
+		if (checkpoint->checkpointId != player.visibleCheckpoint)
 		{
 			if (player.visibleCheckpoint)
 			{
 				sampgdk::DisablePlayerCheckpoint(player.playerId);
-				if (d->second->streamCallbacks)
+				if (checkpoint->streamCallbacks)
 				{
-					streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_CP, d->second->checkpointId, player.playerId));
+					streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_CP, checkpoint->checkpointId, player.playerId));
 				}
 				player.activeCheckpoint = 0;
 			}
-			player.delayedCheckpoint = d->second->checkpointId;
+			player.delayedCheckpoint = checkpoint->checkpointId;
 		}
-		if (d->second->cell)
+		if (checkpoint->cell)
 		{
-			player.visibleCell->checkpoints.insert(std::make_pair(d->second->checkpointId, d->second));
+			player.visibleCell->checkpoints.insert(std::make_pair(checkpoint->checkpointId, checkpoint));
 		}
 	}
 }
 
 void Streamer::processMapIcons(Player &player, const std::vector<SharedCell> &cells)
 {
-	std::multimap<std::pair<int, float>, Item::SharedMapIcon, Item::PairCompare> discoveredMapIcons, existingMapIcons;
+	std::vector<Item::Candidate<Item::SharedMapIcon> > &discoveredMapIcons = player.discoveredMapIconCandidates;
+	std::vector<Item::Candidate<Item::SharedMapIcon> > &existingMapIcons = player.existingMapIconCandidates;
+	discoveredMapIcons.clear();
+	existingMapIcons.clear();
 	for (std::vector<SharedCell>::const_iterator c = cells.begin(); c != cells.end(); ++c)
 	{
 		for (std::unordered_map<int, Item::SharedMapIcon>::const_iterator m = (*c)->mapIcons.begin(); m != (*c)->mapIcons.end(); ++m)
@@ -816,7 +827,7 @@ void Streamer::processMapIcons(Player &player, const std::vector<SharedCell> &ce
 			{
 				if (i == player.internalMapIcons.end())
 				{
-					discoveredMapIcons.insert(std::make_pair(std::make_pair(m->second->priority, distance), m->second));
+					discoveredMapIcons.push_back(Item::Candidate<Item::SharedMapIcon>(m->second->priority, distance, m->second));
 				}
 				else
 				{
@@ -824,7 +835,7 @@ void Streamer::processMapIcons(Player &player, const std::vector<SharedCell> &ce
 					{
 						player.visibleCell->mapIcons.insert(*m);
 					}
-					existingMapIcons.insert(std::make_pair(std::make_pair(m->second->priority, distance), m->second));
+					existingMapIcons.push_back(Item::Candidate<Item::SharedMapIcon>(m->second->priority, distance, m->second));
 				}
 			}
 			else
@@ -842,36 +853,41 @@ void Streamer::processMapIcons(Player &player, const std::vector<SharedCell> &ce
 			}
 		}
 	}
-	for (std::multimap<std::pair<int, float>, Item::SharedMapIcon, Item::PairCompare>::iterator d = discoveredMapIcons.begin(); d != discoveredMapIcons.end(); ++d)
+	std::sort(discoveredMapIcons.begin(), discoveredMapIcons.end(), Item::CandidateCompare<Item::SharedMapIcon>());
+	std::sort(existingMapIcons.begin(), existingMapIcons.end(), Item::CandidateCompare<Item::SharedMapIcon>());
+	for (std::vector<Item::Candidate<Item::SharedMapIcon> >::iterator d = discoveredMapIcons.begin(); d != discoveredMapIcons.end(); ++d)
 	{
-		std::unordered_map<int, int>::iterator i = player.internalMapIcons.find(d->second->mapIconId);
+		const Item::SharedMapIcon &mapIcon = d->item;
+		std::unordered_map<int, int>::iterator i = player.internalMapIcons.find(mapIcon->mapIconId);
 		if (i != player.internalMapIcons.end())
 		{
 			continue;
 		}
 		if (player.internalMapIcons.size() == player.maxVisibleMapIcons)
 		{
-			std::multimap<std::pair<int, float>, Item::SharedMapIcon, Item::PairCompare>::reverse_iterator e = existingMapIcons.rbegin();
-			if (e != existingMapIcons.rend())
+			// existingMapIcons is sorted ascending under the multimap's own
+			// comparator, so back() is exactly the old rbegin() element.
+			if (!existingMapIcons.empty())
 			{
-				if (e->first.first < d->first.first || (e->first.second > STREAMER_STATIC_DISTANCE_CUTOFF && d->first.second < e->first.second))
+				const Item::Candidate<Item::SharedMapIcon> &e = existingMapIcons.back();
+				if (e.priority < d->priority || (e.distance > STREAMER_STATIC_DISTANCE_CUTOFF && d->distance < e.distance))
 				{
-					std::unordered_map<int, int>::iterator j = player.internalMapIcons.find(e->second->mapIconId);
+					std::unordered_map<int, int>::iterator j = player.internalMapIcons.find(e.item->mapIconId);
 					if (j != player.internalMapIcons.end())
 					{
 						sampgdk::RemovePlayerMapIcon(player.playerId, j->second);
-						if (e->second->streamCallbacks)
+						if (e.item->streamCallbacks)
 						{
-							streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_MAP_ICON, e->second->mapIconId, player.playerId));
+							streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_MAP_ICON, e.item->mapIconId, player.playerId));
 						}
 						player.mapIconIdentifier.remove(j->second, player.internalMapIcons.size());
 						player.internalMapIcons.erase(j);
 					}
-					if (e->second->cell)
+					if (e.item->cell)
 					{
-						player.visibleCell->mapIcons.erase(e->second->mapIconId);
+						player.visibleCell->mapIcons.erase(e.item->mapIconId);
 					}
-					existingMapIcons.erase(--e.base());
+					existingMapIcons.pop_back();
 				}
 			}
 			if (player.internalMapIcons.size() == player.maxVisibleMapIcons)
@@ -880,22 +896,27 @@ void Streamer::processMapIcons(Player &player, const std::vector<SharedCell> &ce
 			}
 		}
 		int internalId = player.mapIconIdentifier.get();
-		sampgdk::SetPlayerMapIcon(player.playerId, internalId, d->second->position[0], d->second->position[1], d->second->position[2], d->second->type, d->second->color, d->second->style);
-		if (d->second->streamCallbacks)
+		sampgdk::SetPlayerMapIcon(player.playerId, internalId, mapIcon->position[0], mapIcon->position[1], mapIcon->position[2], mapIcon->type, mapIcon->color, mapIcon->style);
+		if (mapIcon->streamCallbacks)
 		{
-			streamInCallbacks.push_back(std::make_tuple(STREAMER_TYPE_MAP_ICON, d->second->mapIconId, player.playerId));
+			streamInCallbacks.push_back(std::make_tuple(STREAMER_TYPE_MAP_ICON, mapIcon->mapIconId, player.playerId));
 		}
-		player.internalMapIcons.insert(std::make_pair(d->second->mapIconId, internalId));
-		if (d->second->cell)
+		player.internalMapIcons.insert(std::make_pair(mapIcon->mapIconId, internalId));
+		if (mapIcon->cell)
 		{
-			player.visibleCell->mapIcons.insert(std::make_pair(d->second->mapIconId, d->second));
+			player.visibleCell->mapIcons.insert(std::make_pair(mapIcon->mapIconId, mapIcon));
 		}
 	}
 }
 
 void Streamer::processObjects(Player &player, const std::vector<SharedCell> &cells)
 {
-	std::multimap<std::pair<int, float>, Item::SharedObject, Item::PairCompare> discoveredObjects, existingObjects;
+	// Reused per-player buffers. The ordering is identical to the multimap this
+	// replaces, but there is no red-black tree node allocation per candidate.
+	std::vector<Item::Candidate<Item::SharedObject> > &discoveredObjects = player.discoveredObjectCandidates;
+	std::vector<Item::Candidate<Item::SharedObject> > &existingObjects = player.existingObjectCandidates;
+	discoveredObjects.clear();
+	existingObjects.clear();
 	for (std::vector<SharedCell>::const_iterator c = cells.begin(); c != cells.end(); ++c)
 	{
 		for (std::unordered_map<int, Item::SharedObject>::const_iterator o = (*c)->objects.begin(); o != (*c)->objects.end(); ++o)
@@ -924,7 +945,7 @@ void Streamer::processObjects(Player &player, const std::vector<SharedCell> &cel
 			{
 				if (i == player.internalObjects.end())
 				{
-					discoveredObjects.insert(std::make_pair(std::make_pair(o->second->priority, distance), o->second));
+					discoveredObjects.push_back(Item::Candidate<Item::SharedObject>(o->second->priority, distance, o->second));
 				}
 				else
 				{
@@ -932,7 +953,7 @@ void Streamer::processObjects(Player &player, const std::vector<SharedCell> &cel
 					{
 						player.visibleCell->objects.insert(*o);
 					}
-					existingObjects.insert(std::make_pair(std::make_pair(o->second->priority, distance), o->second));
+					existingObjects.push_back(Item::Candidate<Item::SharedObject>(o->second->priority, distance, o->second));
 				}
 			}
 			else
@@ -949,19 +970,24 @@ void Streamer::processObjects(Player &player, const std::vector<SharedCell> &cel
 			}
 		}
 	}
-	for (std::multimap<std::pair<int, float>, Item::SharedObject, Item::PairCompare>::iterator d = discoveredObjects.begin(); d != discoveredObjects.end(); ++d)
+	// Sort ascending under the same comparator the multimap used, so the loop
+	// below visits candidates in exactly the order it always did.
+	std::sort(discoveredObjects.begin(), discoveredObjects.end(), Item::CandidateCompare<Item::SharedObject>());
+	std::sort(existingObjects.begin(), existingObjects.end(), Item::CandidateCompare<Item::SharedObject>());
+	for (std::vector<Item::Candidate<Item::SharedObject> >::iterator d = discoveredObjects.begin(); d != discoveredObjects.end(); ++d)
 	{
-		std::unordered_map<int, int>::iterator i = player.internalObjects.find(d->second->objectId);
+		const Item::SharedObject &object = d->item;
+		std::unordered_map<int, int>::iterator i = player.internalObjects.find(object->objectId);
 		if (i != player.internalObjects.end())
 		{
 			continue;
 		}
 		int internalBaseId = INVALID_STREAMER_ID;
-		if (d->second->attach)
+		if (object->attach)
 		{
-			if (d->second->attach->object != INVALID_STREAMER_ID)
+			if (object->attach->object != INVALID_STREAMER_ID)
 			{
-				std::unordered_map<int, int>::iterator j = player.internalObjects.find(d->second->attach->object);
+				std::unordered_map<int, int>::iterator j = player.internalObjects.find(object->attach->object);
 				if (j == player.internalObjects.end())
 				{
 					continue;
@@ -971,26 +997,28 @@ void Streamer::processObjects(Player &player, const std::vector<SharedCell> &cel
 		}
 		if (player.internalObjects.size() == player.currentVisibleObjects)
 		{
-			std::multimap<std::pair<int, float>, Item::SharedObject, Item::PairCompare>::reverse_iterator e = existingObjects.rbegin();
-			if (e != existingObjects.rend())
+			// existingObjects is sorted ascending under that same comparator,
+			// so back() is exactly the element the old rbegin() pointed at.
+			if (!existingObjects.empty())
 			{
-				if (e->first.first < d->first.first || (e->first.second > STREAMER_STATIC_DISTANCE_CUTOFF && d->first.second < e->first.second))
+				const Item::Candidate<Item::SharedObject> &e = existingObjects.back();
+				if (e.priority < d->priority || (e.distance > STREAMER_STATIC_DISTANCE_CUTOFF && d->distance < e.distance))
 				{
-					std::unordered_map<int, int>::iterator j = player.internalObjects.find(e->second->objectId);
+					std::unordered_map<int, int>::iterator j = player.internalObjects.find(e.item->objectId);
 					if (j != player.internalObjects.end())
 					{
 						sampgdk::DestroyPlayerObject(player.playerId, j->second);
-						if (e->second->streamCallbacks)
+						if (e.item->streamCallbacks)
 						{
-							streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_OBJECT, e->second->objectId, player.playerId));
+							streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_OBJECT, e.item->objectId, player.playerId));
 						}
 						player.internalObjects.erase(j);
 					}
-					if (e->second->cell)
+					if (e.item->cell)
 					{
-						player.visibleCell->objects.erase(e->second->objectId);
+						player.visibleCell->objects.erase(e.item->objectId);
 					}
-					existingObjects.erase(--e.base());
+					existingObjects.pop_back();
 				}
 			}
 		}
@@ -999,44 +1027,44 @@ void Streamer::processObjects(Player &player, const std::vector<SharedCell> &cel
 			player.currentVisibleObjects = player.internalObjects.size();
 			break;
 		}
-		int internalId = sampgdk::CreatePlayerObject(player.playerId, d->second->modelId, d->second->position[0], d->second->position[1], d->second->position[2], d->second->rotation[0], d->second->rotation[1], d->second->rotation[2], d->second->drawDistance);
+		int internalId = sampgdk::CreatePlayerObject(player.playerId, object->modelId, object->position[0], object->position[1], object->position[2], object->rotation[0], object->rotation[1], object->rotation[2], object->drawDistance);
 		if (internalId == INVALID_OBJECT_ID)
 		{
 			player.currentVisibleObjects = player.internalObjects.size();
 			break;
 		}
-		if (d->second->streamCallbacks)
+		if (object->streamCallbacks)
 		{
-			streamInCallbacks.push_back(std::make_tuple(STREAMER_TYPE_OBJECT, d->second->objectId, player.playerId));
+			streamInCallbacks.push_back(std::make_tuple(STREAMER_TYPE_OBJECT, object->objectId, player.playerId));
 		}
-		if (d->second->attach)
+		if (object->attach)
 		{
 			if (internalBaseId != INVALID_STREAMER_ID)
 			{
 				static AMX_NATIVE native = sampgdk::FindNative("AttachPlayerObjectToObject");
 				if (native != NULL)
 				{
-					sampgdk::InvokeNative(native, "dddffffffb", player.playerId, internalId, internalBaseId, d->second->attach->positionOffset[0], d->second->attach->positionOffset[1], d->second->attach->positionOffset[2], d->second->attach->rotation[0], d->second->attach->rotation[1], d->second->attach->rotation[2], d->second->attach->syncRotation);
+					sampgdk::InvokeNative(native, "dddffffffb", player.playerId, internalId, internalBaseId, object->attach->positionOffset[0], object->attach->positionOffset[1], object->attach->positionOffset[2], object->attach->rotation[0], object->attach->rotation[1], object->attach->rotation[2], object->attach->syncRotation);
 				}
 			}
-			else if (d->second->attach->player != INVALID_PLAYER_ID)
+			else if (object->attach->player != INVALID_PLAYER_ID)
 			{
 				static AMX_NATIVE native = sampgdk::FindNative("AttachPlayerObjectToPlayer");
 				if (native != NULL)
 				{
-					sampgdk::InvokeNative(native, "dddffffffd", player.playerId, internalId, d->second->attach->player, d->second->attach->positionOffset[0], d->second->attach->positionOffset[1], d->second->attach->positionOffset[2], d->second->attach->rotation[0], d->second->attach->rotation[1], d->second->attach->rotation[2], 1);
+					sampgdk::InvokeNative(native, "dddffffffd", player.playerId, internalId, object->attach->player, object->attach->positionOffset[0], object->attach->positionOffset[1], object->attach->positionOffset[2], object->attach->rotation[0], object->attach->rotation[1], object->attach->rotation[2], 1);
 				}
 			}
-			else if (d->second->attach->vehicle != INVALID_VEHICLE_ID)
+			else if (object->attach->vehicle != INVALID_VEHICLE_ID)
 			{
-				sampgdk::AttachPlayerObjectToVehicle(player.playerId, internalId, d->second->attach->vehicle, d->second->attach->positionOffset[0], d->second->attach->positionOffset[1], d->second->attach->positionOffset[2], d->second->attach->rotation[0], d->second->attach->rotation[1], d->second->attach->rotation[2]);
+				sampgdk::AttachPlayerObjectToVehicle(player.playerId, internalId, object->attach->vehicle, object->attach->positionOffset[0], object->attach->positionOffset[1], object->attach->positionOffset[2], object->attach->rotation[0], object->attach->rotation[1], object->attach->rotation[2]);
 			}
 		}
-		else if (d->second->move)
+		else if (object->move)
 		{
-			sampgdk::MovePlayerObject(player.playerId, internalId, std::get<0>(d->second->move->position)[0], std::get<0>(d->second->move->position)[1], std::get<0>(d->second->move->position)[2], d->second->move->speed, std::get<0>(d->second->move->rotation)[0], std::get<0>(d->second->move->rotation)[1], std::get<0>(d->second->move->rotation)[2]);
+			sampgdk::MovePlayerObject(player.playerId, internalId, std::get<0>(object->move->position)[0], std::get<0>(object->move->position)[1], std::get<0>(object->move->position)[2], object->move->speed, std::get<0>(object->move->rotation)[0], std::get<0>(object->move->rotation)[1], std::get<0>(object->move->rotation)[2]);
 		}
-		for (std::unordered_map<int, Item::Object::Material>::iterator m = d->second->materials.begin(); m != d->second->materials.end(); ++m)
+		for (std::unordered_map<int, Item::Object::Material>::iterator m = object->materials.begin(); m != object->materials.end(); ++m)
 		{
 			if (m->second.main)
 			{
@@ -1047,14 +1075,14 @@ void Streamer::processObjects(Player &player, const std::vector<SharedCell> &cel
 				sampgdk::SetPlayerObjectMaterialText(player.playerId, internalId, m->second.text->materialText.c_str(), m->first, m->second.text->materialSize, m->second.text->fontFace.c_str(), m->second.text->fontSize, m->second.text->bold, m->second.text->fontColor, m->second.text->backColor, m->second.text->textAlignment);
 			}
 		}
-		if (d->second->noCameraCollision)
+		if (object->noCameraCollision)
 		{
 			sampgdk::SetPlayerObjectNoCameraCol(player.playerId, internalId);
 		}
-		player.internalObjects.insert(std::make_pair(d->second->objectId, internalId));
-		if (d->second->cell)
+		player.internalObjects.insert(std::make_pair(object->objectId, internalId));
+		if (object->cell)
 		{
-			player.visibleCell->objects.insert(std::make_pair(d->second->objectId, d->second));
+			player.visibleCell->objects.insert(std::make_pair(object->objectId, object));
 		}
 	}
 }
@@ -1141,7 +1169,8 @@ void Streamer::streamPickups()
 
 void Streamer::processRaceCheckpoints(Player &player, const std::vector<SharedCell> &cells)
 {
-	std::multimap<std::pair<int, float>, Item::SharedRaceCheckpoint, Item::PairCompare> discoveredRaceCheckpoints;
+	std::vector<Item::Candidate<Item::SharedRaceCheckpoint> > &discoveredRaceCheckpoints = player.discoveredRaceCheckpointCandidates;
+	discoveredRaceCheckpoints.clear();
 	for (std::vector<SharedCell>::const_iterator c = cells.begin(); c != cells.end(); ++c)
 	{
 		for (std::unordered_map<int, Item::SharedRaceCheckpoint>::const_iterator r = (*c)->raceCheckpoints.begin(); r != (*c)->raceCheckpoints.end(); ++r)
@@ -1160,7 +1189,7 @@ void Streamer::processRaceCheckpoints(Player &player, const std::vector<SharedCe
 			}
 			if (distance < (r->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_RACE_CP]))
 			{
-				discoveredRaceCheckpoints.insert(std::make_pair(std::make_pair(r->second->priority, distance), r->second));
+				discoveredRaceCheckpoints.push_back(Item::Candidate<Item::SharedRaceCheckpoint>(r->second->priority, distance, r->second));
 			}
 			else
 			{
@@ -1179,30 +1208,35 @@ void Streamer::processRaceCheckpoints(Player &player, const std::vector<SharedCe
 	}
 	if (!discoveredRaceCheckpoints.empty())
 	{
-		std::multimap<std::pair<int, float>, Item::SharedRaceCheckpoint, Item::PairCompare>::iterator d = discoveredRaceCheckpoints.begin();
-		if (d->second->raceCheckpointId != player.visibleRaceCheckpoint)
+		// Only the best candidate is ever used, so a min_element under the same
+		// comparator replaces the multimap's begin() without a full sort.
+		const Item::SharedRaceCheckpoint &raceCheckpoint = std::min_element(discoveredRaceCheckpoints.begin(), discoveredRaceCheckpoints.end(), Item::CandidateCompare<Item::SharedRaceCheckpoint>())->item;
+		if (raceCheckpoint->raceCheckpointId != player.visibleRaceCheckpoint)
 		{
 			if (player.visibleRaceCheckpoint)
 			{
 				sampgdk::DisablePlayerRaceCheckpoint(player.playerId);
-				if (d->second->streamCallbacks)
+				if (raceCheckpoint->streamCallbacks)
 				{
-					streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_RACE_CP, d->second->raceCheckpointId, player.playerId));
+					streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_RACE_CP, raceCheckpoint->raceCheckpointId, player.playerId));
 				}
 				player.activeRaceCheckpoint = 0;
 			}
-			player.delayedRaceCheckpoint = d->second->raceCheckpointId;
+			player.delayedRaceCheckpoint = raceCheckpoint->raceCheckpointId;
 		}
-		if (d->second->cell)
+		if (raceCheckpoint->cell)
 		{
-			player.visibleCell->raceCheckpoints.insert(std::make_pair(d->second->raceCheckpointId, d->second));
+			player.visibleCell->raceCheckpoints.insert(std::make_pair(raceCheckpoint->raceCheckpointId, raceCheckpoint));
 		}
 	}
 }
 
 void Streamer::processTextLabels(Player &player, const std::vector<SharedCell> &cells)
 {
-	std::multimap<std::pair<int, float>, Item::SharedTextLabel, Item::PairCompare> discoveredTextLabels, existingTextLabels;
+	std::vector<Item::Candidate<Item::SharedTextLabel> > &discoveredTextLabels = player.discoveredTextLabelCandidates;
+	std::vector<Item::Candidate<Item::SharedTextLabel> > &existingTextLabels = player.existingTextLabelCandidates;
+	discoveredTextLabels.clear();
+	existingTextLabels.clear();
 	for (std::vector<SharedCell>::const_iterator c = cells.begin(); c != cells.end(); ++c)
 	{
 		for (std::unordered_map<int, Item::SharedTextLabel>::const_iterator t = (*c)->textLabels.begin(); t != (*c)->textLabels.end(); ++t)
@@ -1231,7 +1265,7 @@ void Streamer::processTextLabels(Player &player, const std::vector<SharedCell> &
 			{
 				if (i == player.internalTextLabels.end())
 				{
-					discoveredTextLabels.insert(std::make_pair(std::make_pair(t->second->priority, distance), t->second));
+					discoveredTextLabels.push_back(Item::Candidate<Item::SharedTextLabel>(t->second->priority, distance, t->second));
 				}
 				else
 				{
@@ -1239,7 +1273,7 @@ void Streamer::processTextLabels(Player &player, const std::vector<SharedCell> &
 					{
 						player.visibleCell->textLabels.insert(*t);
 					}
-					existingTextLabels.insert(std::make_pair(std::make_pair(t->second->priority, distance), t->second));
+					existingTextLabels.push_back(Item::Candidate<Item::SharedTextLabel>(t->second->priority, distance, t->second));
 				}
 			}
 			else
@@ -1256,35 +1290,40 @@ void Streamer::processTextLabels(Player &player, const std::vector<SharedCell> &
 			}
 		}
 	}
-	for (std::multimap<std::pair<int, float>, Item::SharedTextLabel, Item::PairCompare>::iterator d = discoveredTextLabels.begin(); d != discoveredTextLabels.end(); ++d)
+	std::sort(discoveredTextLabels.begin(), discoveredTextLabels.end(), Item::CandidateCompare<Item::SharedTextLabel>());
+	std::sort(existingTextLabels.begin(), existingTextLabels.end(), Item::CandidateCompare<Item::SharedTextLabel>());
+	for (std::vector<Item::Candidate<Item::SharedTextLabel> >::iterator d = discoveredTextLabels.begin(); d != discoveredTextLabels.end(); ++d)
 	{
-		std::unordered_map<int, int>::iterator i = player.internalTextLabels.find(d->second->textLabelId);
+		const Item::SharedTextLabel &textLabel = d->item;
+		std::unordered_map<int, int>::iterator i = player.internalTextLabels.find(textLabel->textLabelId);
 		if (i != player.internalTextLabels.end())
 		{
 			continue;
 		}
 		if (player.internalTextLabels.size() == player.currentVisibleTextLabels)
 		{
-			std::multimap<std::pair<int, float>, Item::SharedTextLabel, Item::PairCompare>::reverse_iterator e = existingTextLabels.rbegin();
-			if (e != existingTextLabels.rend())
+			// existingTextLabels is sorted ascending under that same
+			// comparator, so back() is exactly the old rbegin() element.
+			if (!existingTextLabels.empty())
 			{
-				if (e->first.first < d->first.first || (e->first.second > STREAMER_STATIC_DISTANCE_CUTOFF && d->first.second < e->first.second))
+				const Item::Candidate<Item::SharedTextLabel> &e = existingTextLabels.back();
+				if (e.priority < d->priority || (e.distance > STREAMER_STATIC_DISTANCE_CUTOFF && d->distance < e.distance))
 				{
-					std::unordered_map<int, int>::iterator j = player.internalTextLabels.find(e->second->textLabelId);
+					std::unordered_map<int, int>::iterator j = player.internalTextLabels.find(e.item->textLabelId);
 					if (j != player.internalTextLabels.end())
 					{
 						sampgdk::DeletePlayer3DTextLabel(player.playerId, j->second);
-						if (e->second->streamCallbacks)
+						if (e.item->streamCallbacks)
 						{
-							streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_3D_TEXT_LABEL, e->second->textLabelId, player.playerId));
+							streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_3D_TEXT_LABEL, e.item->textLabelId, player.playerId));
 						}
 						player.internalTextLabels.erase(j);
 					}
-					if (e->second->cell)
+					if (e.item->cell)
 					{
-						player.visibleCell->textLabels.erase(e->second->textLabelId);
+						player.visibleCell->textLabels.erase(e.item->textLabelId);
 					}
-					existingTextLabels.erase(--e.base());
+					existingTextLabels.pop_back();
 				}
 			}
 		}
@@ -1293,20 +1332,20 @@ void Streamer::processTextLabels(Player &player, const std::vector<SharedCell> &
 			player.currentVisibleTextLabels = player.internalTextLabels.size();
 			break;
 		}
-		int internalId = sampgdk::CreatePlayer3DTextLabel(player.playerId, d->second->text.c_str(), d->second->color, d->second->position[0], d->second->position[1], d->second->position[2], d->second->drawDistance, d->second->attach ? d->second->attach->player : INVALID_PLAYER_ID, d->second->attach ? d->second->attach->vehicle : INVALID_VEHICLE_ID, d->second->testLOS);
+		int internalId = sampgdk::CreatePlayer3DTextLabel(player.playerId, textLabel->text.c_str(), textLabel->color, textLabel->position[0], textLabel->position[1], textLabel->position[2], textLabel->drawDistance, textLabel->attach ? textLabel->attach->player : INVALID_PLAYER_ID, textLabel->attach ? textLabel->attach->vehicle : INVALID_VEHICLE_ID, textLabel->testLOS);
 		if (internalId == INVALID_3DTEXT_ID)
 		{
 			player.currentVisibleTextLabels = player.internalTextLabels.size();
 			break;
 		}
-		if (d->second->streamCallbacks)
+		if (textLabel->streamCallbacks)
 		{
-			streamInCallbacks.push_back(std::make_tuple(STREAMER_TYPE_3D_TEXT_LABEL, d->second->textLabelId, player.playerId));
+			streamInCallbacks.push_back(std::make_tuple(STREAMER_TYPE_3D_TEXT_LABEL, textLabel->textLabelId, player.playerId));
 		}
-		player.internalTextLabels.insert(std::make_pair(d->second->textLabelId, internalId));
-		if (d->second->cell)
+		player.internalTextLabels.insert(std::make_pair(textLabel->textLabelId, internalId));
+		if (textLabel->cell)
 		{
-			player.visibleCell->textLabels.insert(std::make_pair(d->second->textLabelId, d->second));
+			player.visibleCell->textLabels.insert(std::make_pair(textLabel->textLabelId, textLabel));
 		}
 	}
 }
