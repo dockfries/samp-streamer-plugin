@@ -17,8 +17,128 @@
 #ifndef PLAYER_H
 #define PLAYER_H
 
+#include <algorithm>
+#include <cstdint>
+#include <unordered_map>
+#include <vector>
+
 #include "cell.h"
 #include "identifier.h"
+
+// Internal ("player object") id table for one item type. The map stays the
+// source of truth; a bitmap mirrors its keys so the streaming hot path can test
+// membership in O(1) without hashing every candidate in the player's cells.
+// All mutations go through insert/erase/clear, which keeps both in sync.
+class InternalIdMap
+{
+public:
+	typedef std::unordered_map<int, int>::iterator iterator;
+	typedef std::unordered_map<int, int>::const_iterator const_iterator;
+
+	iterator begin()
+	{
+		return entries.begin();
+	}
+
+	iterator end()
+	{
+		return entries.end();
+	}
+
+	const_iterator begin() const
+	{
+		return entries.begin();
+	}
+
+	const_iterator end() const
+	{
+		return entries.end();
+	}
+
+	iterator find(int id)
+	{
+		return entries.find(id);
+	}
+
+	const_iterator find(int id) const
+	{
+		return entries.find(id);
+	}
+
+	bool contains(int id) const
+	{
+		if (id < 0)
+		{
+			return false;
+		}
+		std::size_t word = static_cast<std::size_t>(id) >> 6;
+		return word < bits.size() && (bits[word] & (std::uint64_t(1) << (id & 63))) != 0;
+	}
+
+	std::pair<iterator, bool> insert(const std::pair<int, int> &value)
+	{
+		setBit(value.first);
+		return entries.insert(value);
+	}
+
+	iterator erase(iterator position)
+	{
+		clearBit(position->first);
+		return entries.erase(position);
+	}
+
+	std::size_t erase(int id)
+	{
+		clearBit(id);
+		return entries.erase(id);
+	}
+
+	std::size_t size() const
+	{
+		return entries.size();
+	}
+
+	bool empty() const
+	{
+		return entries.empty();
+	}
+
+	void clear()
+	{
+		entries.clear();
+		std::fill(bits.begin(), bits.end(), 0);
+	}
+private:
+	void setBit(int id)
+	{
+		if (id < 0)
+		{
+			return;
+		}
+		std::size_t word = static_cast<std::size_t>(id) >> 6;
+		if (word >= bits.size())
+		{
+			bits.resize(word + 1, 0);
+		}
+		bits[word] |= std::uint64_t(1) << (id & 63);
+	}
+
+	void clearBit(int id)
+	{
+		if (id < 0)
+		{
+			return;
+		}
+		std::size_t word = static_cast<std::size_t>(id) >> 6;
+		if (word < bits.size())
+		{
+			bits[word] &= ~(std::uint64_t(1) << (id & 63));
+		}
+	}
+
+	std::unordered_map<int, int> entries;
+	std::vector<std::uint64_t> bits;
+};
 
 struct Player
 {
@@ -46,6 +166,7 @@ struct Player
 	bool requestingClass;
 	std::size_t tickCount;
 	std::size_t tickRate;
+	bool updatedThisTick;
 	bool updateUsingCameraPosition;
 	bool updateWhenIdle;
 	SharedCell visibleCell;
@@ -60,9 +181,13 @@ struct Player
 	Item::Bimap<Item::SharedObject>::Type discoveredObjects;
 	Item::Bimap<Item::SharedTextLabel>::Type discoveredTextLabels;
 
-	Item::Bimap<Item::SharedMapIcon>::Type existingMapIcons;
-	Item::Bimap<Item::SharedObject>::Type existingObjects;
-	Item::Bimap<Item::SharedTextLabel>::Type existingTextLabels;
+	// Already streamed candidates for the chunked types. These are rebuilt on
+	// every player update and only read while draining, so they are kept as
+	// reused sorted vectors instead of a bimap: no node allocation per
+	// candidate and a much cheaper insertion path.
+	std::vector<Item::Candidate<Item::SharedMapIcon> > existingMapIcons;
+	std::vector<Item::Candidate<Item::SharedObject> > existingObjects;
+	std::vector<Item::Candidate<Item::SharedTextLabel> > existingTextLabels;
 
 	// Scratch candidate lists for the non-chunk streaming passes. Held on the
 	// player rather than rebuilt per update so those passes stop allocating a
@@ -77,9 +202,9 @@ struct Player
 	std::vector<Item::Candidate<Item::SharedTextLabel> > existingTextLabelCandidates;
 
 	std::unordered_set<int> internalAreas;
-	std::unordered_map<int, int> internalMapIcons;
-	std::unordered_map<int, int> internalObjects;
-	std::unordered_map<int, int> internalTextLabels;
+	InternalIdMap internalMapIcons;
+	InternalIdMap internalObjects;
+	InternalIdMap internalTextLabels;
 
 	std::unordered_set<int> removedMapIcons;
 	std::unordered_set<int> removedObjects;

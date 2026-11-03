@@ -549,6 +549,46 @@ void Grid::removeTextLabel(const Item::SharedTextLabel &textLabel, bool reassign
 	}
 }
 
+void Grid::updateObjectCell(const Item::SharedObject &object)
+{
+	if (!object->cell)
+	{
+		return;
+	}
+	Eigen::Vector2f position = object->attach
+		? Eigen::Vector2f(object->attach->position[0], object->attach->position[1])
+		: Eigen::Vector2f(object->position[0], object->position[1]);
+	if (!position.allFinite())
+	{
+		// A script can feed inf/NaN positions; getCellId would convert them to
+		// int, which is undefined. Leave the object in its current cell.
+		return;
+	}
+	if (getCellId(position, false) != object->cell->cellId)
+	{
+		removeObject(object, true);
+	}
+}
+
+void Grid::updateTextLabelCell(const Item::SharedTextLabel &textLabel)
+{
+	if (!textLabel->cell)
+	{
+		return;
+	}
+	Eigen::Vector2f position = textLabel->attach
+		? Eigen::Vector2f(textLabel->attach->position[0], textLabel->attach->position[1])
+		: Eigen::Vector2f(textLabel->position[0], textLabel->position[1]);
+	if (!position.allFinite())
+	{
+		return;
+	}
+	if (getCellId(position, false) != textLabel->cell->cellId)
+	{
+		removeTextLabel(textLabel, true);
+	}
+}
+
 CellId Grid::getCellId(const Eigen::Vector2f &position, bool insert)
 {
 	static Box2d box;

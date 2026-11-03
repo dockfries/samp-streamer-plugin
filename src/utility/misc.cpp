@@ -81,11 +81,8 @@ std::unordered_map<int, Item::SharedMapIcon>::iterator Utility::destroyMapIcon(s
 		{
 			p->second.discoveredMapIcons.right.erase(d);
 		}
-		Item::Bimap<Item::SharedMapIcon>::Type::right_iterator e = p->second.existingMapIcons.right.find(std::make_tuple(m->first, m->second));
-		if (e != p->second.existingMapIcons.right.end())
-		{
-			p->second.existingMapIcons.right.erase(e);
-		}
+		// existingMapIcons is a rebuilt candidate vector; a stale entry is
+		// discarded lazily the next time it is selected for eviction.
 		std::unordered_map<int, int>::iterator i = p->second.internalMapIcons.find(m->first);
 		if (i != p->second.internalMapIcons.end())
 		{
@@ -114,11 +111,8 @@ std::unordered_map<int, Item::SharedObject>::iterator Utility::destroyObject(std
 		{
 			p->second.discoveredObjects.right.erase(d);
 		}
-		Item::Bimap<Item::SharedObject>::Type::right_iterator e = p->second.existingObjects.right.find(std::make_tuple(o->first, o->second));
-		if (e != p->second.existingObjects.right.end())
-		{
-			p->second.existingObjects.right.erase(e);
-		}
+		// existingObjects is a rebuilt candidate vector; a stale entry is
+		// discarded lazily the next time it is selected for eviction.
 		std::unordered_map<int, int>::iterator i = p->second.internalObjects.find(o->first);
 		if (i != p->second.internalObjects.end())
 		{
@@ -184,11 +178,8 @@ std::unordered_map<int, Item::SharedTextLabel>::iterator Utility::destroyTextLab
 		{
 			p->second.discoveredTextLabels.right.erase(d);
 		}
-		Item::Bimap<Item::SharedTextLabel>::Type::right_iterator e = p->second.existingTextLabels.right.find(std::make_tuple(t->first, t->second));
-		if (e != p->second.existingTextLabels.right.end())
-		{
-			p->second.existingTextLabels.right.erase(e);
-		}
+		// existingTextLabels is a rebuilt candidate vector; a stale entry is
+		// discarded lazily the next time it is selected for eviction.
 		std::unordered_map<int, int>::iterator i = p->second.internalTextLabels.find(t->first);
 		if (i != p->second.internalTextLabels.end())
 		{

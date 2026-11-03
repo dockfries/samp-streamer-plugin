@@ -64,6 +64,13 @@ public:
 	void removeRaceCheckpoint(const Item::SharedRaceCheckpoint &raceCheckpoint, bool reassign = false);
 	void removeTextLabel(const Item::SharedTextLabel &textLabel, bool reassign = false);
 
+	// Re-index an object/text label only when it actually moved to another
+	// cell. Re-inserting on every position change churns the cell hash maps
+	// (and allocates cells) even though the cell membership is unchanged,
+	// which is the common case for slowly moving/attached items.
+	void updateObjectCell(const Item::SharedObject &object);
+	void updateTextLabelCell(const Item::SharedTextLabel &textLabel);
+
 	void findAllCellsForPlayer(Player &player, std::vector<SharedCell> &playerCells);
 	void findMinimalCellsForPlayer(Player &player, std::vector<SharedCell> &playerCells);
 	void findMinimalCellsForPoint(const Eigen::Vector2f &point, std::vector<SharedCell> &pointCells);

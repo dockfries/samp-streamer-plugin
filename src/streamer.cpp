@@ -25,6 +25,8 @@ Streamer::Streamer()
 	lastUpdateTime = 0.0f;
 	tickCount = 0;
 	tickRate = 50;
+	hasLastUpdateTickTime = false;
+	updateBudget = 1.5f;
 	velocityBoundaries = std::make_tuple(0.25f, 7.5f);
 }
 
@@ -54,50 +56,127 @@ void Streamer::startAutomaticUpdate()
 	if (!core->getData()->interfaces.empty())
 	{
 		std::chrono::steady_clock::time_point currentTime = std::chrono::steady_clock::now();
+		// Bound the per-player work of one tick to roughly half of the observed
+		// server tick (capped at 3 ms). Without this, a tick where many players
+		// are due costs players * update time and stalls the server regardless
+		// of the configured tick rates.
+		updateBudget = 1.5f;
+		if (hasLastUpdateTickTime)
+		{
+			float tickInterval = std::chrono::duration<float, std::milli>(currentTime - lastUpdateTickTime).count();
+			if (tickInterval > 0.0f)
+			{
+				updateBudget = std::max(0.5f, std::min(3.0f, tickInterval * 0.5f));
+			}
+		}
+		lastUpdateTickTime = currentTime;
+		hasLastUpdateTickTime = true;
+		float spent = 0.0f;
+		bool budgetExhausted = false;
 		if (!core->getData()->players.empty())
 		{
-			bool updatedActiveItems = false;
-			for (std::unordered_map<int, Player>::iterator p = core->getData()->players.begin(); p != core->getData()->players.end(); ++p)
+			// Players deferred by the previous tick are retried first so a long
+			// list of due players cannot starve them.
+			if (!deferredPlayers.empty())
 			{
-				// Draining a pending chunk queue must not starve the regular
-				// update. The old code took the chunk branch *instead of* the
-				// tick gate and never incremented tickCount, so
-				// performPlayerUpdate (and with it every area, checkpoint and
-				// race checkpoint check) was skipped for as long as a player had
-				// chunks pending. If every player was in that state,
-				// processActiveItems() never ran at all, freezing moving and
-				// attached objects. Advancing the tick gate unconditionally and
-				// only draining as a fallback keeps both on their normal
-				// cadence without slowing the drain down.
-				if (++p->second.tickCount >= p->second.tickRate)
+				std::vector<int> carried;
+				carried.swap(deferredPlayers);
+				for (std::vector<int>::const_iterator d = carried.begin(); d != carried.end(); ++d)
 				{
-					if (!updatedActiveItems)
+					std::unordered_map<int, Player>::iterator p = core->getData()->players.find(*d);
+					if (p == core->getData()->players.end() || p->second.tickCount < p->second.tickRate)
 					{
-						processActiveItems();
-						updatedActiveItems = true;
+						continue;
+					}
+					if (budgetExhausted)
+					{
+						deferredPlayers.push_back(*d);
+						p->second.updatedThisTick = true;
+						continue;
 					}
 					if (!p->second.delayedUpdate)
 					{
+						std::chrono::steady_clock::time_point updateStart = std::chrono::steady_clock::now();
 						performPlayerUpdate(p->second, true);
+						float elapsedTime = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - updateStart).count();
+						spent += elapsedTime;
 					}
 					else
 					{
 						startManualUpdate(p->second, p->second.delayedUpdateType);
 					}
 					p->second.tickCount = 0;
+					p->second.updatedThisTick = true;
+					if (spent >= updateBudget)
+					{
+						budgetExhausted = true;
+					}
 				}
-				else if (core->getChunkStreamer()->getChunkStreamingEnabled() && p->second.processingChunks.any())
+			}
+			for (std::unordered_map<int, Player>::iterator p = core->getData()->players.begin(); p != core->getData()->players.end(); ++p)
+			{
+				if (p->second.updatedThisTick)
 				{
+					// Already handled by the deferred-first pass above. Do not
+					// advance tickCount for this tick: the update reset it, so
+					// advancing here would make the next one come a tick early.
+					p->second.updatedThisTick = false;
+					continue;
+				}
+				++p->second.tickCount;
+				// Draining a pending chunk queue must not starve the regular
+				// update, so the tick gate advances unconditionally and the
+				// drain is only a fallback. See the chunk streamer for the
+				// drain rate itself.
+				if (p->second.tickCount >= p->second.tickRate)
+				{
+					if (budgetExhausted)
+					{
+						// Leave tickCount alone: the player stays due and is
+						// retried first on the next tick.
+						deferredPlayers.push_back(p->first);
+						continue;
+					}
+					if (!p->second.delayedUpdate)
+					{
+						std::chrono::steady_clock::time_point updateStart = std::chrono::steady_clock::now();
+						performPlayerUpdate(p->second, true);
+						float elapsedTime = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - updateStart).count();
+						spent += elapsedTime;
+					}
+					else
+					{
+						startManualUpdate(p->second, p->second.delayedUpdateType);
+					}
+					p->second.tickCount = 0;
+					if (spent >= updateBudget)
+					{
+						budgetExhausted = true;
+					}
+				}
+				else if (!budgetExhausted && core->getChunkStreamer()->getChunkStreamingEnabled() && p->second.processingChunks.any())
+				{
+					std::chrono::steady_clock::time_point drainStart = std::chrono::steady_clock::now();
 					core->getChunkStreamer()->performPlayerChunkUpdate(p->second, true);
+					spent += std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - drainStart).count();
+					if (spent >= updateBudget)
+					{
+						budgetExhausted = true;
+					}
 				}
 			}
 		}
-		else
-		{
-			processActiveItems();
-		}
 		if (++tickCount >= tickRate)
 		{
+			// Moving and attached items are global state, so they belong to
+			// the global tick. When this pass was moved into the per-player
+			// branch above, it ran on essentially every server tick as soon as
+			// enough players were online (at most once per tick thanks to the
+			// old guard, i.e. up to tickRate times more often than intended),
+			// which is what made large servers fall over in 2.9.x. Update them
+			// here, once per global tick, and keep the per-player gate for the
+			// per-player streaming work only.
+			processActiveItems();
 			for (std::unordered_map<int, Player>::iterator p = core->getData()->players.begin(); p != core->getData()->players.end(); ++p)
 			{
 				std::vector<SharedCell> cells;
@@ -635,7 +714,7 @@ void Streamer::discoverActors(Player &player, const std::vector<SharedCell> &cel
 						const int playerWorldId = *w == -1 ? -1 : player.worldId;
 						if (doesPlayerSatisfyConditions(a->second->players, player.playerId, a->second->interiors, player.interiorId, a->second->worlds, playerWorldId, a->second->areas, player.internalAreas, a->second->inverseAreaChecking))
 						{
-							if (a->second->comparableStreamDistance < STREAMER_STATIC_DISTANCE_CUTOFF || boost::geometry::comparable_distance(player.position, Eigen::Vector3f(a->second->position + a->second->positionOffset)) < (a->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_ACTOR]))
+							if (a->second->comparableStreamDistance < STREAMER_STATIC_DISTANCE_CUTOFF || Utility::isWithinComparableDistance(player.position, Eigen::Vector3f(a->second->position + a->second->positionOffset), a->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_ACTOR]))
 							{
 								core->getData()->discoveredActors.insert(std::make_pair(std::make_pair(a->first, *w), a->second));
 							}
@@ -752,7 +831,7 @@ void Streamer::processCheckpoints(Player &player, const std::vector<SharedCell> 
 				}
 				else
 				{
-					distance = static_cast<float>(boost::geometry::comparable_distance(player.position, Eigen::Vector3f(d->second->position + d->second->positionOffset)));
+					distance = Utility::comparableDistance(player.position, Eigen::Vector3f(d->second->position + d->second->positionOffset), d->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_CP]);
 				}
 			}
 			if (distance < (d->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_CP]))
@@ -819,13 +898,13 @@ void Streamer::processMapIcons(Player &player, const std::vector<SharedCell> &ce
 				}
 				else
 				{
-					distance = static_cast<float>(boost::geometry::comparable_distance(player.position, Eigen::Vector3f(m->second->position + m->second->positionOffset)));
+					distance = Utility::comparableDistance(player.position, Eigen::Vector3f(m->second->position + m->second->positionOffset), m->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_MAP_ICON]);
 				}
 			}
-			std::unordered_map<int, int>::iterator i = player.internalMapIcons.find(m->first);
+			const bool streamed = player.internalMapIcons.contains(m->first);
 			if (distance < (m->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_MAP_ICON]))
 			{
-				if (i == player.internalMapIcons.end())
+				if (!streamed)
 				{
 					discoveredMapIcons.push_back(Item::Candidate<Item::SharedMapIcon>(m->second->priority, distance, m->second));
 				}
@@ -838,8 +917,9 @@ void Streamer::processMapIcons(Player &player, const std::vector<SharedCell> &ce
 					existingMapIcons.push_back(Item::Candidate<Item::SharedMapIcon>(m->second->priority, distance, m->second));
 				}
 			}
-			else
+			else if (streamed)
 			{
+				std::unordered_map<int, int>::iterator i = player.internalMapIcons.find(m->first);
 				if (i != player.internalMapIcons.end())
 				{
 					sampgdk::RemovePlayerMapIcon(player.playerId, i->second);
@@ -932,18 +1012,18 @@ void Streamer::processObjects(Player &player, const std::vector<SharedCell> &cel
 				{
 					if (o->second->attach)
 					{
-						distance = static_cast<float>(boost::geometry::comparable_distance(player.position, o->second->attach->position)) + std::numeric_limits<float>::epsilon();
+						distance = Utility::comparableDistance(player.position, o->second->attach->position, o->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_OBJECT]) + std::numeric_limits<float>::epsilon();
 					}
 					else
 					{
-						distance = static_cast<float>(boost::geometry::comparable_distance(player.position, Eigen::Vector3f(o->second->position + o->second->positionOffset)));
+						distance = Utility::comparableDistance(player.position, Eigen::Vector3f(o->second->position + o->second->positionOffset), o->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_OBJECT]);
 					}
 				}
 			}
-			std::unordered_map<int, int>::iterator i = player.internalObjects.find(o->first);
+			const bool streamed = player.internalObjects.contains(o->first);
 			if (distance < (o->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_OBJECT]))
 			{
-				if (i == player.internalObjects.end())
+				if (!streamed)
 				{
 					discoveredObjects.push_back(Item::Candidate<Item::SharedObject>(o->second->priority, distance, o->second));
 				}
@@ -956,8 +1036,9 @@ void Streamer::processObjects(Player &player, const std::vector<SharedCell> &cel
 					existingObjects.push_back(Item::Candidate<Item::SharedObject>(o->second->priority, distance, o->second));
 				}
 			}
-			else
+			else if (streamed)
 			{
+				std::unordered_map<int, int>::iterator i = player.internalObjects.find(o->first);
 				if (i != player.internalObjects.end())
 				{
 					sampgdk::DestroyPlayerObject(player.playerId, i->second);
@@ -1106,7 +1187,7 @@ void Streamer::discoverPickups(Player &player, const std::vector<SharedCell> &ce
 					const int playerWorldId = *w == -1 ? -1 : player.worldId;
 					if (doesPlayerSatisfyConditions(p->second->players, player.playerId, p->second->interiors, player.interiorId, p->second->worlds, playerWorldId, p->second->areas, player.internalAreas, p->second->inverseAreaChecking))
 					{
-						if (p->second->comparableStreamDistance < STREAMER_STATIC_DISTANCE_CUTOFF || boost::geometry::comparable_distance(player.position, Eigen::Vector3f(p->second->position + p->second->positionOffset)) < (p->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_PICKUP]))
+						if (p->second->comparableStreamDistance < STREAMER_STATIC_DISTANCE_CUTOFF || Utility::isWithinComparableDistance(player.position, Eigen::Vector3f(p->second->position + p->second->positionOffset), p->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_PICKUP]))
 						{
 							core->getData()->discoveredPickups.insert(std::make_pair(std::make_pair(p->first, *w), p->second));
 						}
@@ -1184,7 +1265,7 @@ void Streamer::processRaceCheckpoints(Player &player, const std::vector<SharedCe
 				}
 				else
 				{
-					distance = static_cast<float>(boost::geometry::comparable_distance(player.position, Eigen::Vector3f(r->second->position + r->second->positionOffset)));
+					distance = Utility::comparableDistance(player.position, Eigen::Vector3f(r->second->position + r->second->positionOffset), r->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_RACE_CP]);
 				}
 			}
 			if (distance < (r->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_RACE_CP]))
@@ -1252,18 +1333,18 @@ void Streamer::processTextLabels(Player &player, const std::vector<SharedCell> &
 				{
 					if (t->second->attach)
 					{
-						distance = static_cast<float>(boost::geometry::comparable_distance(player.position, t->second->attach->position));
+						distance = Utility::comparableDistance(player.position, t->second->attach->position, t->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_3D_TEXT_LABEL]);
 					}
 					else
 					{
-						distance = static_cast<float>(boost::geometry::comparable_distance(player.position, Eigen::Vector3f(t->second->position + t->second->positionOffset)));
+						distance = Utility::comparableDistance(player.position, Eigen::Vector3f(t->second->position + t->second->positionOffset), t->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_3D_TEXT_LABEL]);
 					}
 				}
 			}
-			std::unordered_map<int, int>::iterator i = player.internalTextLabels.find(t->first);
+			const bool streamed = player.internalTextLabels.contains(t->first);
 			if (distance < (t->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_3D_TEXT_LABEL]))
 			{
-				if (i == player.internalTextLabels.end())
+				if (!streamed)
 				{
 					discoveredTextLabels.push_back(Item::Candidate<Item::SharedTextLabel>(t->second->priority, distance, t->second));
 				}
@@ -1276,8 +1357,9 @@ void Streamer::processTextLabels(Player &player, const std::vector<SharedCell> &
 					existingTextLabels.push_back(Item::Candidate<Item::SharedTextLabel>(t->second->priority, distance, t->second));
 				}
 			}
-			else
+			else if (streamed)
 			{
+				std::unordered_map<int, int>::iterator i = player.internalTextLabels.find(t->first);
 				if (i != player.internalTextLabels.end())
 				{
 					sampgdk::DeletePlayer3DTextLabel(player.playerId, i->second);
@@ -1372,13 +1454,16 @@ void Streamer::processActiveItems()
 
 void Streamer::processMovingObjects()
 {
+	// All objects in this pass advance against the same clock read; reading it
+	// once removes a steady_clock::now() per moving object per pass.
+	std::chrono::steady_clock::time_point currentTime = std::chrono::steady_clock::now();
 	std::unordered_set<Item::SharedObject>::iterator o = movingObjects.begin();
 	while (o != movingObjects.end())
 	{
 		bool objectFinishedMoving = false;
 		if ((*o)->move)
 		{
-			std::chrono::duration<float, std::milli> elapsedTime = std::chrono::steady_clock::now() - (*o)->move->time;
+			std::chrono::duration<float, std::milli> elapsedTime = currentTime - (*o)->move->time;
 			if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsedTime).count() < (*o)->move->duration)
 			{
 				(*o)->position = std::get<1>((*o)->move->position) + (std::get<2>((*o)->move->position) * elapsedTime.count());
@@ -1398,10 +1483,10 @@ void Streamer::processMovingObjects()
 				objectMoveCallbacks.push_back((*o)->objectId);
 				objectFinishedMoving = true;
 			}
-			if ((*o)->cell)
-			{
-				core->getGrid()->removeObject(*o, true);
-			}
+			// Only re-index when the object actually crosses a cell boundary;
+			// the old code erased and re-inserted it in the grid on every pass
+			// even though it stayed in the same cell.
+			core->getGrid()->updateObjectCell(*o);
 		}
 		if (objectFinishedMoving)
 		{
@@ -1416,6 +1501,28 @@ void Streamer::processMovingObjects()
 
 void Streamer::processAttachedAreas()
 {
+	// Anchors are constant within one pass. Areas attached to the same player
+	// or vehicle used to re-fetch the anchor (and, for vehicles, scan every
+	// player to decide whether the vehicle is occupied) once per area. Cache
+	// the per-anchor data for the duration of the pass instead.
+	struct PlayerAnchor
+	{
+		float position[3];
+		float heading;
+		bool valid;
+	};
+	struct VehicleAnchor
+	{
+		float position[3];
+		float heading;
+		float rotation[4];
+		bool occupied;
+		bool valid;
+	};
+	std::unordered_map<int, PlayerAnchor> playerAnchors;
+	std::unordered_map<int, VehicleAnchor> vehicleAnchors;
+	std::unordered_set<int> occupiedVehicles;
+	bool occupancyBuilt = false;
 	for (std::unordered_set<Item::SharedArea>::iterator a = attachedAreas.begin(); a != attachedAreas.end(); ++a)
 	{
 		if ((*a)->attach)
@@ -1455,38 +1562,72 @@ void Streamer::processAttachedAreas()
 			}
 			else if ((*a)->attach->player != INVALID_PLAYER_ID)
 			{
-				float heading = 0.0f;
-				Eigen::Vector3f position = Eigen::Vector3f::Zero();
-				adjust = sampgdk::GetPlayerPos((*a)->attach->player, &position[0], &position[1], &position[2]);
-				sampgdk::GetPlayerFacingAngle((*a)->attach->player, &heading);
-				Utility::constructAttachedArea(*a, std::variant<float, Eigen::Vector3f, Eigen::Vector4f>(heading), position);
+				std::unordered_map<int, PlayerAnchor>::iterator cached = playerAnchors.find((*a)->attach->player);
+				if (cached == playerAnchors.end())
+				{
+					PlayerAnchor anchor;
+					anchor.position[0] = 0.0f;
+					anchor.position[1] = 0.0f;
+					anchor.position[2] = 0.0f;
+					anchor.heading = 0.0f;
+					anchor.valid = sampgdk::GetPlayerPos((*a)->attach->player, &anchor.position[0], &anchor.position[1], &anchor.position[2]);
+					sampgdk::GetPlayerFacingAngle((*a)->attach->player, &anchor.heading);
+					cached = playerAnchors.insert(std::make_pair((*a)->attach->player, anchor)).first;
+				}
+				adjust = cached->second.valid;
+				Utility::constructAttachedArea(*a, std::variant<float, Eigen::Vector3f, Eigen::Vector4f>(cached->second.heading), Eigen::Vector3f(cached->second.position[0], cached->second.position[1], cached->second.position[2]));
 			}
 			else if ((*a)->attach->vehicle != INVALID_VEHICLE_ID)
 			{
-				bool occupied = false;
-				for (std::unordered_map<int, Player>::iterator p = core->getData()->players.begin(); p != core->getData()->players.end(); ++p)
+				std::unordered_map<int, VehicleAnchor>::iterator cached = vehicleAnchors.find((*a)->attach->vehicle);
+				if (cached == vehicleAnchors.end())
 				{
-					if (sampgdk::GetPlayerState(p->first) == PLAYER_STATE_DRIVER)
+					VehicleAnchor anchor;
+					anchor.position[0] = 0.0f;
+					anchor.position[1] = 0.0f;
+					anchor.position[2] = 0.0f;
+					anchor.heading = 0.0f;
+					anchor.rotation[0] = 0.0f;
+					anchor.rotation[1] = 0.0f;
+					anchor.rotation[2] = 0.0f;
+					anchor.rotation[3] = 0.0f;
+					if (!occupancyBuilt)
 					{
-						if (sampgdk::GetPlayerVehicleID(p->first) == (*a)->attach->vehicle)
+						// Resolve occupancy for every vehicle once per pass instead
+						// of once per vehicle-attached area. The old per-area loop
+						// was O(areas * players) native calls, and it could not
+						// break early for a parked vehicle because no driver was
+						// found.
+						for (std::unordered_map<int, Player>::iterator p = core->getData()->players.begin(); p != core->getData()->players.end(); ++p)
 						{
-							occupied = true;
-							break;
+							if (sampgdk::GetPlayerState(p->first) == PLAYER_STATE_DRIVER)
+							{
+								occupiedVehicles.insert(sampgdk::GetPlayerVehicleID(p->first));
+							}
 						}
+						occupancyBuilt = true;
 					}
+					anchor.occupied = occupiedVehicles.find((*a)->attach->vehicle) != occupiedVehicles.end();
+					anchor.valid = sampgdk::GetVehiclePos((*a)->attach->vehicle, &anchor.position[0], &anchor.position[1], &anchor.position[2]);
+					if (!anchor.occupied)
+					{
+						sampgdk::GetVehicleZAngle((*a)->attach->vehicle, &anchor.heading);
+					}
+					else
+					{
+						sampgdk::GetVehicleRotationQuat((*a)->attach->vehicle, &anchor.rotation[0], &anchor.rotation[1], &anchor.rotation[2], &anchor.rotation[3]);
+					}
+					cached = vehicleAnchors.insert(std::make_pair((*a)->attach->vehicle, anchor)).first;
 				}
-				Eigen::Vector3f position = Eigen::Vector3f::Zero();
-				adjust = sampgdk::GetVehiclePos((*a)->attach->vehicle, &position[0], &position[1], &position[2]);
-				if (!occupied)
+				adjust = cached->second.valid;
+				Eigen::Vector3f position(cached->second.position[0], cached->second.position[1], cached->second.position[2]);
+				if (!cached->second.occupied)
 				{
-					float heading = 0.0f;
-					sampgdk::GetVehicleZAngle((*a)->attach->vehicle, &heading);
-					Utility::constructAttachedArea(*a, std::variant<float, Eigen::Vector3f, Eigen::Vector4f>(heading), position);
+					Utility::constructAttachedArea(*a, std::variant<float, Eigen::Vector3f, Eigen::Vector4f>(cached->second.heading), position);
 				}
 				else
 				{
-					Eigen::Vector4f quaternion = Eigen::Vector4f::Zero();
-					sampgdk::GetVehicleRotationQuat((*a)->attach->vehicle, &quaternion[0], &quaternion[1], &quaternion[2], &quaternion[3]);
+					Eigen::Vector4f quaternion(cached->second.rotation[0], cached->second.rotation[1], cached->second.rotation[2], cached->second.rotation[3]);
 					Utility::constructAttachedArea(*a, std::variant<float, Eigen::Vector3f, Eigen::Vector4f>(quaternion), position);
 				}
 			}
@@ -1537,12 +1678,23 @@ void Streamer::processAttachedAreas()
 
 void Streamer::processAttachedObjects()
 {
+	// Anchor transforms are constant within one pass. Objects attached to the
+	// same player/vehicle used to fetch the anchor position and virtual world
+	// once per object; with thousands of attachments that was thousands of
+	// native calls per pass. Cache them per anchor instead.
+	struct Anchor
+	{
+		Eigen::Vector3f position;
+		int world;
+		bool valid;
+	};
+	std::unordered_map<int, Anchor> playerAnchors;
+	std::unordered_map<int, Anchor> vehicleAnchors;
 	for (std::unordered_set<Item::SharedObject>::iterator o = attachedObjects.begin(); o != attachedObjects.end(); ++o)
 	{
 		if ((*o)->attach)
 		{
 			bool adjust = false;
-			Eigen::Vector3f position = (*o)->attach->position;
 			if ((*o)->attach->object != INVALID_STREAMER_ID)
 			{
 				std::unordered_map<int, Item::SharedObject>::iterator p = core->getData()->objects.find((*o)->attach->object);
@@ -1555,20 +1707,38 @@ void Streamer::processAttachedObjects()
 			}
 			else if ((*o)->attach->player != INVALID_PLAYER_ID)
 			{
-				adjust = sampgdk::GetPlayerPos((*o)->attach->player, &(*o)->attach->position[0], &(*o)->attach->position[1], &(*o)->attach->position[2]);
-				Utility::setFirstValueInContainer((*o)->attach->worlds, sampgdk::GetPlayerVirtualWorld((*o)->attach->player));
+				std::unordered_map<int, Anchor>::iterator cached = playerAnchors.find((*o)->attach->player);
+				if (cached == playerAnchors.end())
+				{
+					Anchor anchor;
+					anchor.position.setZero();
+					anchor.valid = sampgdk::GetPlayerPos((*o)->attach->player, &anchor.position[0], &anchor.position[1], &anchor.position[2]);
+					anchor.world = sampgdk::GetPlayerVirtualWorld((*o)->attach->player);
+					cached = playerAnchors.insert(std::make_pair((*o)->attach->player, anchor)).first;
+				}
+				(*o)->attach->position = cached->second.position;
+				Utility::setFirstValueInContainer((*o)->attach->worlds, cached->second.world);
+				adjust = cached->second.valid;
 			}
 			else if ((*o)->attach->vehicle != INVALID_VEHICLE_ID)
 			{
-				adjust = sampgdk::GetVehiclePos((*o)->attach->vehicle, &(*o)->attach->position[0], &(*o)->attach->position[1], &(*o)->attach->position[2]);
-				Utility::setFirstValueInContainer((*o)->attach->worlds, sampgdk::GetVehicleVirtualWorld((*o)->attach->vehicle));
+				std::unordered_map<int, Anchor>::iterator cached = vehicleAnchors.find((*o)->attach->vehicle);
+				if (cached == vehicleAnchors.end())
+				{
+					Anchor anchor;
+					anchor.position.setZero();
+					anchor.valid = sampgdk::GetVehiclePos((*o)->attach->vehicle, &anchor.position[0], &anchor.position[1], &anchor.position[2]);
+					anchor.world = sampgdk::GetVehicleVirtualWorld((*o)->attach->vehicle);
+					cached = vehicleAnchors.insert(std::make_pair((*o)->attach->vehicle, anchor)).first;
+				}
+				(*o)->attach->position = cached->second.position;
+				Utility::setFirstValueInContainer((*o)->attach->worlds, cached->second.world);
+				adjust = cached->second.valid;
 			}
 			if (adjust)
 			{
-				if ((*o)->cell && !(*o)->attach->position.isApprox(position))
-				{
-					core->getGrid()->removeObject(*o, true);
-				}
+				// Re-index only when the anchor moved the object to another cell.
+				core->getGrid()->updateObjectCell(*o);
 			}
 			else
 			{
@@ -1580,28 +1750,55 @@ void Streamer::processAttachedObjects()
 
 void Streamer::processAttachedTextLabels()
 {
+	// Same per-anchor cache as processAttachedObjects: labels attached to the
+	// same player/vehicle share one anchor transform per pass.
+	struct Anchor
+	{
+		Eigen::Vector3f position;
+		int world;
+		bool valid;
+	};
+	std::unordered_map<int, Anchor> playerAnchors;
+	std::unordered_map<int, Anchor> vehicleAnchors;
 	for (std::unordered_set<Item::SharedTextLabel>::iterator t = attachedTextLabels.begin(); t != attachedTextLabels.end(); ++t)
 	{
 		bool adjust = false;
-		Eigen::Vector3f position = (*t)->attach->position;
 		if ((*t)->attach)
 		{
 			if ((*t)->attach->player != INVALID_PLAYER_ID)
 			{
-				adjust = sampgdk::GetPlayerPos((*t)->attach->player, &(*t)->attach->position[0], &(*t)->attach->position[1], &(*t)->attach->position[2]);
-				Utility::setFirstValueInContainer((*t)->attach->worlds, sampgdk::GetPlayerVirtualWorld((*t)->attach->player));
+				std::unordered_map<int, Anchor>::iterator cached = playerAnchors.find((*t)->attach->player);
+				if (cached == playerAnchors.end())
+				{
+					Anchor anchor;
+					anchor.position.setZero();
+					anchor.valid = sampgdk::GetPlayerPos((*t)->attach->player, &anchor.position[0], &anchor.position[1], &anchor.position[2]);
+					anchor.world = sampgdk::GetPlayerVirtualWorld((*t)->attach->player);
+					cached = playerAnchors.insert(std::make_pair((*t)->attach->player, anchor)).first;
+				}
+				(*t)->attach->position = cached->second.position;
+				Utility::setFirstValueInContainer((*t)->attach->worlds, cached->second.world);
+				adjust = cached->second.valid;
 			}
 			else if ((*t)->attach->vehicle != INVALID_VEHICLE_ID)
 			{
-				adjust = sampgdk::GetVehiclePos((*t)->attach->vehicle, &(*t)->attach->position[0], &(*t)->attach->position[1], &(*t)->attach->position[2]);
-				Utility::setFirstValueInContainer((*t)->attach->worlds, sampgdk::GetVehicleVirtualWorld((*t)->attach->vehicle));
+				std::unordered_map<int, Anchor>::iterator cached = vehicleAnchors.find((*t)->attach->vehicle);
+				if (cached == vehicleAnchors.end())
+				{
+					Anchor anchor;
+					anchor.position.setZero();
+					anchor.valid = sampgdk::GetVehiclePos((*t)->attach->vehicle, &anchor.position[0], &anchor.position[1], &anchor.position[2]);
+					anchor.world = sampgdk::GetVehicleVirtualWorld((*t)->attach->vehicle);
+					cached = vehicleAnchors.insert(std::make_pair((*t)->attach->vehicle, anchor)).first;
+				}
+				(*t)->attach->position = cached->second.position;
+				Utility::setFirstValueInContainer((*t)->attach->worlds, cached->second.world);
+				adjust = cached->second.valid;
 			}
 			if (adjust)
 			{
-				if ((*t)->cell && !(*t)->attach->position.isApprox(position))
-				{
-					core->getGrid()->removeTextLabel(*t, true);
-				}
+				// Re-index only when the anchor moved the label to another cell.
+				core->getGrid()->updateTextLabelCell(*t);
 			}
 			else
 			{

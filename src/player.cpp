@@ -56,6 +56,7 @@ Player::Player(int id)
 	requestingClass = false;
 	tickCount = 0;
 	tickRate = 50;
+	updatedThisTick = false;
 	updateUsingCameraPosition = false;
 	updateWhenIdle = false;
 	visibleCell = std::make_shared<Cell>();

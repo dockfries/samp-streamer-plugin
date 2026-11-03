@@ -17,11 +17,40 @@
 #ifndef UTILITY_GEOMETRY_H
 #define UTILITY_GEOMETRY_H
 
+#include <cmath>
+
 #include "misc.h"
 #include "../item.h"
 
 namespace Utility
 {
+	// boost::geometry::comparable_distance promotes the coordinates to double,
+	// which costs roughly 1.5x a plain float squared distance. The float result
+	// only differs in the last bits, so it is used directly unless the
+	// candidate lies close enough to the threshold for those bits to flip the
+	// comparison; in that narrow band the exact boost result is used instead.
+	inline float comparableDistance(const Eigen::Vector3f &point, const Eigen::Vector3f &origin, float threshold)
+	{
+		Eigen::Vector3f delta = point - origin;
+		float squaredDistance = delta.squaredNorm();
+		if (std::fabs(squaredDistance - threshold) <= threshold * 1e-5f)
+		{
+			return static_cast<float>(boost::geometry::comparable_distance(point, origin));
+		}
+		return squaredDistance;
+	}
+
+	inline bool isWithinComparableDistance(const Eigen::Vector3f &point, const Eigen::Vector3f &origin, float threshold)
+	{
+		Eigen::Vector3f delta = point - origin;
+		float squaredDistance = delta.squaredNorm();
+		if (std::fabs(squaredDistance - threshold) <= threshold * 1e-5f)
+		{
+			return boost::geometry::comparable_distance(point, origin) < threshold;
+		}
+		return squaredDistance < threshold;
+	}
+
 	bool doesLineSegmentIntersectArea(const Eigen::Vector3f &lineSegmentStart, const Eigen::Vector3f &lineSegmentEnd, const Item::SharedArea &area);
 	bool isPointInArea(const Eigen::Vector3f &point, const Item::SharedArea &area);
 

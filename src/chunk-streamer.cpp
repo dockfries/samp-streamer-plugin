@@ -109,6 +109,7 @@ void ChunkStreamer::performPlayerChunkUpdate(Player &player, bool automatic)
 
 void ChunkStreamer::discoverMapIcons(Player &player, const std::vector<SharedCell> &cells)
 {
+	player.existingMapIcons.clear();
 	for (std::vector<SharedCell>::const_iterator c = cells.begin(); c != cells.end(); ++c)
 	{
 		for (std::unordered_map<int, Item::SharedMapIcon>::const_iterator m = (*c)->mapIcons.begin(); m != (*c)->mapIcons.end(); ++m)
@@ -122,13 +123,13 @@ void ChunkStreamer::discoverMapIcons(Player &player, const std::vector<SharedCel
 				}
 				else
 				{
-					distance = static_cast<float>(boost::geometry::comparable_distance(player.position, Eigen::Vector3f(m->second->position + m->second->positionOffset)));
+					distance = Utility::comparableDistance(player.position, Eigen::Vector3f(m->second->position + m->second->positionOffset), m->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_MAP_ICON]);
 				}
 			}
-			std::unordered_map<int, int>::iterator i = player.internalMapIcons.find(m->first);
+			const bool streamed = player.internalMapIcons.contains(m->first);
 			if (distance < (m->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_MAP_ICON]))
 			{
-				if (i == player.internalMapIcons.end())
+				if (!streamed)
 				{
 					player.discoveredMapIcons.insert(Item::Bimap<Item::SharedMapIcon>::Type::value_type(std::make_tuple(m->second->priority, distance), std::make_tuple(m->first, m->second)));
 				}
@@ -138,15 +139,12 @@ void ChunkStreamer::discoverMapIcons(Player &player, const std::vector<SharedCel
 					{
 						player.visibleCell->mapIcons.insert(*m);
 					}
-					player.existingMapIcons.insert(Item::Bimap<Item::SharedMapIcon>::Type::value_type(std::make_tuple(m->second->priority, distance), std::make_tuple(m->first, m->second)));
+					player.existingMapIcons.push_back(Item::Candidate<Item::SharedMapIcon>(m->second->priority, distance, m->second));
 				}
 			}
-			else
+			else if (streamed)
 			{
-				if (i != player.internalMapIcons.end())
-				{
-					player.removedMapIcons.insert(i->first);
-				}
+				player.removedMapIcons.insert(m->first);
 			}
 		}
 	}
@@ -154,6 +152,7 @@ void ChunkStreamer::discoverMapIcons(Player &player, const std::vector<SharedCel
 	{
 		player.processingChunks.set(STREAMER_TYPE_MAP_ICON);
 	}
+	std::make_heap(player.existingMapIcons.begin(), player.existingMapIcons.end(), Item::CandidateCompare<Item::SharedMapIcon>());
 }
 
 void ChunkStreamer::streamMapIcons(Player &player, bool automatic)
@@ -205,28 +204,44 @@ void ChunkStreamer::streamMapIcons(Player &player, bool automatic)
 				}
 				if (player.internalMapIcons.size() == player.maxVisibleMapIcons)
 				{
-					Item::Bimap<Item::SharedMapIcon>::Type::left_reverse_iterator e = player.existingMapIcons.left.rbegin();
-					if (e != player.existingMapIcons.left.rend())
+					// The candidate vector may still hold entries whose item was
+					// destroyed (and possibly had its id reused) by script since
+					// the last discovery pass.
+					while (!player.existingMapIcons.empty())
 					{
-						if (std::get<0>(e->first) < std::get<0>(d->first) || (std::get<1>(e->first) > STREAMER_STATIC_DISTANCE_CUTOFF && std::get<1>(d->first) < std::get<1>(e->first)))
+						const Item::Candidate<Item::SharedMapIcon> &e = player.existingMapIcons.front();
+						std::unordered_map<int, Item::SharedMapIcon>::iterator current = core->getData()->mapIcons.find(e.item->mapIconId);
+						if (!player.internalMapIcons.contains(e.item->mapIconId) || current == core->getData()->mapIcons.end() || current->second != e.item)
 						{
-							std::unordered_map<int, int>::iterator j = player.internalMapIcons.find(std::get<0>(e->second));
+							std::pop_heap(player.existingMapIcons.begin(), player.existingMapIcons.end(), Item::CandidateCompare<Item::SharedMapIcon>());
+							player.existingMapIcons.pop_back();
+							continue;
+						}
+						break;
+					}
+					if (!player.existingMapIcons.empty())
+					{
+						const Item::Candidate<Item::SharedMapIcon> &e = player.existingMapIcons.front();
+						if (e.priority < std::get<0>(d->first) || (e.distance > STREAMER_STATIC_DISTANCE_CUTOFF && std::get<1>(d->first) < e.distance))
+						{
+							int existingId = e.item->mapIconId;
+							std::unordered_map<int, int>::iterator j = player.internalMapIcons.find(existingId);
 							if (j != player.internalMapIcons.end())
 							{
 								sampgdk::RemovePlayerMapIcon(player.playerId, j->second);
-								if (std::get<1>(e->second)->streamCallbacks)
+								if (e.item->streamCallbacks)
 								{
-									streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_MAP_ICON, std::get<0>(e->second), player.playerId));
+									streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_MAP_ICON, existingId, player.playerId));
 								}
 								player.mapIconIdentifier.remove(j->second, player.internalMapIcons.size());
 								player.internalMapIcons.erase(j);
 							}
-							if (std::get<1>(e->second)->cell)
+							if (e.item->cell)
 							{
-								player.visibleCell->mapIcons.erase(std::get<0>(e->second));
+								player.visibleCell->mapIcons.erase(existingId);
 							}
-							Item::Bimap<Item::SharedMapIcon>::Type::left_iterator f = e.base().base();
-							player.existingMapIcons.left.erase(--f);
+							std::pop_heap(player.existingMapIcons.begin(), player.existingMapIcons.end(), Item::CandidateCompare<Item::SharedMapIcon>());
+							player.existingMapIcons.pop_back();
 						}
 					}
 					if (player.internalMapIcons.size() == player.maxVisibleMapIcons)
@@ -260,6 +275,7 @@ void ChunkStreamer::streamMapIcons(Player &player, bool automatic)
 
 void ChunkStreamer::discoverObjects(Player &player, const std::vector<SharedCell> &cells)
 {
+	player.existingObjects.clear();
 	for (std::vector<SharedCell>::const_iterator c = cells.begin(); c != cells.end(); ++c)
 	{
 		for (std::unordered_map<int, Item::SharedObject>::const_iterator o = (*c)->objects.begin(); o != (*c)->objects.end(); ++o)
@@ -275,18 +291,18 @@ void ChunkStreamer::discoverObjects(Player &player, const std::vector<SharedCell
 				{
 					if (o->second->attach)
 					{
-						distance = static_cast<float>(boost::geometry::comparable_distance(player.position, o->second->attach->position)) + std::numeric_limits<float>::epsilon();
+						distance = Utility::comparableDistance(player.position, o->second->attach->position, o->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_OBJECT]) + std::numeric_limits<float>::epsilon();
 					}
 					else
 					{
-						distance = static_cast<float>(boost::geometry::comparable_distance(player.position, Eigen::Vector3f(o->second->position + o->second->positionOffset)));
+						distance = Utility::comparableDistance(player.position, Eigen::Vector3f(o->second->position + o->second->positionOffset), o->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_OBJECT]);
 					}
 				}
 			}
-			std::unordered_map<int, int>::iterator i = player.internalObjects.find(o->first);
+			const bool streamed = player.internalObjects.contains(o->first);
 			if (distance < (o->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_OBJECT]))
 			{
-				if (i == player.internalObjects.end())
+				if (!streamed)
 				{
 					player.discoveredObjects.insert(Item::Bimap<Item::SharedObject>::Type::value_type(std::make_tuple(o->second->priority, distance), std::make_tuple(o->first, o->second)));
 				}
@@ -296,15 +312,12 @@ void ChunkStreamer::discoverObjects(Player &player, const std::vector<SharedCell
 					{
 						player.visibleCell->objects.insert(*o);
 					}
-					player.existingObjects.insert(Item::Bimap<Item::SharedObject>::Type::value_type(std::make_tuple(o->second->priority, distance), std::make_tuple(o->first, o->second)));
+					player.existingObjects.push_back(Item::Candidate<Item::SharedObject>(o->second->priority, distance, o->second));
 				}
 			}
-			else
+			else if (streamed)
 			{
-				if (i != player.internalObjects.end())
-				{
-					player.removedObjects.insert(i->first);
-				}
+				player.removedObjects.insert(o->first);
 			}
 		}
 	}
@@ -312,6 +325,7 @@ void ChunkStreamer::discoverObjects(Player &player, const std::vector<SharedCell
 	{
 		player.processingChunks.set(STREAMER_TYPE_OBJECT);
 	}
+	std::make_heap(player.existingObjects.begin(), player.existingObjects.end(), Item::CandidateCompare<Item::SharedObject>());
 }
 
 void ChunkStreamer::streamObjects(Player &player, bool automatic)
@@ -377,27 +391,43 @@ void ChunkStreamer::streamObjects(Player &player, bool automatic)
 				}
 				if (player.internalObjects.size() == player.currentVisibleObjects)
 				{
-					Item::Bimap<Item::SharedObject>::Type::left_reverse_iterator e = player.existingObjects.left.rbegin();
-					if (e != player.existingObjects.left.rend())
+					// The candidate vector may still hold entries whose item was
+					// destroyed (and possibly had its id reused) by script since
+					// the last discovery pass.
+					while (!player.existingObjects.empty())
 					{
-						if (std::get<0>(e->first) < std::get<0>(d->first) || (std::get<1>(e->first) > STREAMER_STATIC_DISTANCE_CUTOFF && std::get<1>(d->first) < std::get<1>(e->first)))
+						const Item::Candidate<Item::SharedObject> &e = player.existingObjects.front();
+						std::unordered_map<int, Item::SharedObject>::iterator current = core->getData()->objects.find(e.item->objectId);
+						if (!player.internalObjects.contains(e.item->objectId) || current == core->getData()->objects.end() || current->second != e.item)
 						{
-							std::unordered_map<int, int>::iterator j = player.internalObjects.find(std::get<0>(e->second));
+							std::pop_heap(player.existingObjects.begin(), player.existingObjects.end(), Item::CandidateCompare<Item::SharedObject>());
+							player.existingObjects.pop_back();
+							continue;
+						}
+						break;
+					}
+					if (!player.existingObjects.empty())
+					{
+						const Item::Candidate<Item::SharedObject> &e = player.existingObjects.front();
+						if (e.priority < std::get<0>(d->first) || (e.distance > STREAMER_STATIC_DISTANCE_CUTOFF && std::get<1>(d->first) < e.distance))
+						{
+							int existingId = e.item->objectId;
+							std::unordered_map<int, int>::iterator j = player.internalObjects.find(existingId);
 							if (j != player.internalObjects.end())
 							{
 								sampgdk::DestroyPlayerObject(player.playerId, j->second);
-								if (std::get<1>(e->second)->streamCallbacks)
+								if (e.item->streamCallbacks)
 								{
-									streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_OBJECT, std::get<0>(e->second), player.playerId));
+									streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_OBJECT, existingId, player.playerId));
 								}
 								player.internalObjects.erase(j);
 							}
-							if (std::get<1>(e->second)->cell)
+							if (e.item->cell)
 							{
-								player.visibleCell->objects.erase(std::get<0>(e->second));
+								player.visibleCell->objects.erase(existingId);
 							}
-							Item::Bimap<Item::SharedObject>::Type::left_iterator f = e.base().base();
-							player.existingObjects.left.erase(--f);
+							std::pop_heap(player.existingObjects.begin(), player.existingObjects.end(), Item::CandidateCompare<Item::SharedObject>());
+							player.existingObjects.pop_back();
 						}
 					}
 				}
@@ -482,6 +512,7 @@ void ChunkStreamer::streamObjects(Player &player, bool automatic)
 
 void ChunkStreamer::discoverTextLabels(Player &player, const std::vector<SharedCell> &cells)
 {
+	player.existingTextLabels.clear();
 	for (std::vector<SharedCell>::const_iterator c = cells.begin(); c != cells.end(); ++c)
 	{
 		for (std::unordered_map<int, Item::SharedTextLabel>::const_iterator t = (*c)->textLabels.begin(); t != (*c)->textLabels.end(); ++t)
@@ -497,18 +528,18 @@ void ChunkStreamer::discoverTextLabels(Player &player, const std::vector<SharedC
 				{
 					if (t->second->attach)
 					{
-						distance = static_cast<float>(boost::geometry::comparable_distance(player.position, t->second->attach->position));
+						distance = Utility::comparableDistance(player.position, t->second->attach->position, t->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_3D_TEXT_LABEL]);
 					}
 					else
 					{
-						distance = static_cast<float>(boost::geometry::comparable_distance(player.position, Eigen::Vector3f(t->second->position + t->second->positionOffset)));
+						distance = Utility::comparableDistance(player.position, Eigen::Vector3f(t->second->position + t->second->positionOffset), t->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_3D_TEXT_LABEL]);
 					}
 				}
 			}
-			std::unordered_map<int, int>::iterator i = player.internalTextLabels.find(t->first);
+			const bool streamed = player.internalTextLabels.contains(t->first);
 			if (distance < (t->second->comparableStreamDistance * player.radiusMultipliers[STREAMER_TYPE_3D_TEXT_LABEL]))
 			{
-				if (i == player.internalTextLabels.end())
+				if (!streamed)
 				{
 					player.discoveredTextLabels.insert(Item::Bimap<Item::SharedTextLabel>::Type::value_type(std::make_tuple(t->second->priority, distance), std::make_tuple(t->first, t->second)));
 				}
@@ -518,15 +549,12 @@ void ChunkStreamer::discoverTextLabels(Player &player, const std::vector<SharedC
 					{
 						player.visibleCell->textLabels.insert(*t);
 					}
-					player.existingTextLabels.insert(Item::Bimap<Item::SharedTextLabel>::Type::value_type(std::make_tuple(t->second->priority, distance), std::make_tuple(t->first, t->second)));
+					player.existingTextLabels.push_back(Item::Candidate<Item::SharedTextLabel>(t->second->priority, distance, t->second));
 				}
 			}
-			else
+			else if (streamed)
 			{
-				if (i != player.internalTextLabels.end())
-				{
-					player.removedTextLabels.insert(i->first);
-				}
+				player.removedTextLabels.insert(t->first);
 			}
 		}
 	}
@@ -534,6 +562,7 @@ void ChunkStreamer::discoverTextLabels(Player &player, const std::vector<SharedC
 	{
 		player.processingChunks.set(STREAMER_TYPE_3D_TEXT_LABEL);
 	}
+	std::make_heap(player.existingTextLabels.begin(), player.existingTextLabels.end(), Item::CandidateCompare<Item::SharedTextLabel>());
 }
 
 void ChunkStreamer::streamTextLabels(Player &player, bool automatic)
@@ -585,27 +614,43 @@ void ChunkStreamer::streamTextLabels(Player &player, bool automatic)
 				}
 				if (player.internalTextLabels.size() == player.currentVisibleTextLabels)
 				{
-					Item::Bimap<Item::SharedTextLabel>::Type::left_reverse_iterator e = player.existingTextLabels.left.rbegin();
-					if (e != player.existingTextLabels.left.rend())
+					// The candidate vector may still hold entries whose item was
+					// destroyed (and possibly had its id reused) by script since
+					// the last discovery pass.
+					while (!player.existingTextLabels.empty())
 					{
-						if (std::get<0>(e->first) < std::get<0>(d->first) || (std::get<1>(e->first) > STREAMER_STATIC_DISTANCE_CUTOFF && std::get<1>(d->first) < std::get<1>(e->first)))
+						const Item::Candidate<Item::SharedTextLabel> &e = player.existingTextLabels.front();
+						std::unordered_map<int, Item::SharedTextLabel>::iterator current = core->getData()->textLabels.find(e.item->textLabelId);
+						if (!player.internalTextLabels.contains(e.item->textLabelId) || current == core->getData()->textLabels.end() || current->second != e.item)
 						{
-							std::unordered_map<int, int>::iterator j = player.internalTextLabels.find(std::get<0>(e->second));
+							std::pop_heap(player.existingTextLabels.begin(), player.existingTextLabels.end(), Item::CandidateCompare<Item::SharedTextLabel>());
+							player.existingTextLabels.pop_back();
+							continue;
+						}
+						break;
+					}
+					if (!player.existingTextLabels.empty())
+					{
+						const Item::Candidate<Item::SharedTextLabel> &e = player.existingTextLabels.front();
+						if (e.priority < std::get<0>(d->first) || (e.distance > STREAMER_STATIC_DISTANCE_CUTOFF && std::get<1>(d->first) < e.distance))
+						{
+							int existingId = e.item->textLabelId;
+							std::unordered_map<int, int>::iterator j = player.internalTextLabels.find(existingId);
 							if (j != player.internalTextLabels.end())
 							{
 								sampgdk::DeletePlayer3DTextLabel(player.playerId, j->second);
-								if (std::get<1>(e->second)->streamCallbacks)
+								if (e.item->streamCallbacks)
 								{
-									streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_3D_TEXT_LABEL, std::get<0>(e->second), player.playerId));
+									streamOutCallbacks.push_back(std::make_tuple(STREAMER_TYPE_3D_TEXT_LABEL, existingId, player.playerId));
 								}
 								player.internalTextLabels.erase(j);
 							}
-							if (std::get<1>(e->second)->cell)
+							if (e.item->cell)
 							{
-								player.visibleCell->textLabels.erase(std::get<0>(e->second));
+								player.visibleCell->textLabels.erase(existingId);
 							}
-							Item::Bimap<Item::SharedTextLabel>::Type::left_iterator f = e.base().base();
-							player.existingTextLabels.left.erase(--f);
+							std::pop_heap(player.existingTextLabels.begin(), player.existingTextLabels.end(), Item::CandidateCompare<Item::SharedTextLabel>());
+							player.existingTextLabels.pop_back();
 						}
 					}
 				}

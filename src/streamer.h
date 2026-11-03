@@ -87,6 +87,13 @@ private:
 	std::size_t tickCount;
 	std::size_t tickRate;
 
+	// Players whose automatic update was skipped because the per-tick streaming
+	// budget ran out. They are retried first on the next tick.
+	std::vector<int> deferredPlayers;
+	std::chrono::steady_clock::time_point lastUpdateTickTime;
+	bool hasLastUpdateTickTime;
+	float updateBudget;
+
 	float averageElapsedTime;
 	float lastUpdateTime;
 
